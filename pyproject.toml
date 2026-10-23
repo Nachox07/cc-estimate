@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cc-estimate"
+version = "0.1.0"
+description = "Estimate how long a task will take from your repo's own history, and score the estimates."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+cc-estimate = "cc_estimate.__main__:main"
+
+[tool.setuptools]
+packages = ["cc_estimate"]

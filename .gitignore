@@ -1,0 +1,8 @@
+# Your repo's history and estimates hold other people's activity. Never commit them.
+data/
+.cc-estimate-cache/
+cc-estimate.json
+*.jsonl
+__pycache__/
+*.egg-info/
+.venv/

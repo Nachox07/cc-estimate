@@ -1,0 +1,80 @@
+{
+  "repo": "your-org/your-repo",
+  "source": "github",
+  "timezone": "UTC",
+  "data_dir": "data",
+  "git": {
+    "repo_dir": ".",
+    "branch": "origin/main",
+    "key_regex": "\\b([A-Z][A-Z0-9]+-\\d+)\\b",
+    "quiet_days": 5
+  },
+  "bot_login_patterns": [
+    "\\[bot\\]$",
+    "^github-actions$"
+  ],
+  "bot_logins": [
+    "my-ci-service-account"
+  ],
+  "automation_logins": [
+    "my-release-bot"
+  ],
+  "excluded_labels": {
+    "blocked": [
+      "blocked"
+    ],
+    "removed_review_gate": [
+      "needs-qa"
+    ]
+  },
+  "absence": {
+    "*": [
+      "2026-12-25",
+      "2026-12-26"
+    ],
+    "alice": [
+      "2026-08-03..2026-08-14"
+    ]
+  },
+  "classifier": {
+    "repo_dir": "/path/to/a/local/clone",
+    "default_branch": "origin/main",
+    "area_depth": {
+      "src/": 1,
+      ".github/": 1
+    },
+    "approval_manifest": "config/approval-paths.txt",
+    "tiers_cmd": [
+      "python3",
+      "scripts/which-tests.py"
+    ],
+    "heavy_tiers": [
+      "e2e"
+    ]
+  },
+  "docs_patterns": [
+    "\\.(md|mdx|rst|adoc)$",
+    "(^|/)docs?/"
+  ],
+  "tests_patterns": [
+    "(^|/)(tests?|spec|__tests__|e2e)/",
+    "(^|/)(test_[^/]+|[^/]+_test\\.[a-z]+)$",
+    "\\.(test|spec)\\.[a-z]+$"
+  ],
+  "ignore_globs": [
+    "*package-lock.json",
+    "*yarn.lock",
+    "*pnpm-lock.yaml",
+    "*poetry.lock",
+    "*uv.lock",
+    "*.snap"
+  ],
+  "ai_coauthor_patterns": [
+    "claude",
+    "copilot",
+    "codex",
+    "cursor",
+    "noreply@anthropic\\.com",
+    "openai"
+  ]
+}
