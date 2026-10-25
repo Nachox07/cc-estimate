@@ -1,0 +1,91 @@
+# v0.1.1 hardening, v0.2 measure and sizing advisor, Jira source — design
+
+Status: approved in conversation 2026-10-25. Approach: fix the measure first, then build the advisor on it.
+
+## Why
+
+Two kinds of teams using coding agents report opposite problems. One finishes tickets far faster
+than planned, so old estimates feel meaningless. The other produces very large pull requests.
+The tool must give current ranges for the first, and a reason and a way to cut work for the second.
+Today size counts test lines, so most agent-written changes land in XL; an advisor on that number
+would tell every change to split. The measure is fixed first.
+
+## Release v0.1.1 — make it safe to publish
+
+1. `summary` prints no other person's login or per-person numbers. A test covers every command's
+   output, not just `estimate` and `backtest`.
+2. `backtest` works on any history size: the tuning/locked split scales down, and below a minimum
+   (default 40 finished tasks) it says the history is too short instead of crashing.
+3. The default branch is configurable (`default_branch`, default `main`) in `tasks` and in GitHub scoring.
+4. `git-tasks` matches `#123` as well as `ABC-123` by default.
+5. An empty size bucket returns "not enough history for this size" plus the size-blind range.
+6. Output directories are created when missing.
+7. The git-only source reports **commit span** (first to last keyed commit). The README says it
+   excludes review and merge waiting unless the history includes merge commits on the target branch,
+   in which case the merge time is the end.
+8. Packaging: `.claude-plugin/marketplace.json` at the root, the plugin under `plugin/cc-estimate/`
+   with `.claude-plugin/plugin.json` and `skills/estimate/SKILL.md` as the single copy of the skill.
+   The CLI installs with `pip`. The README documents both, and a fresh-install test runs in CI.
+9. The README claims only what the code shows: the size backtest is a best case that assumes the
+   final size is known; logged estimates measure the real case.
+10. Tracker keys are scored per source: GitHub accepts issue numbers; git accepts any key.
+
+## Release v0.2 — the measure
+
+1. **Size** buckets use product-code lines. Tests and docs are reported beside them. A change is
+   **test-heavy** when test lines exceed 3× code lines; the estimate says so.
+2. **Two parts of cycle time**: *coding* (first commit to ready-for-review, or PR open when there is
+   no draft stage) and *waiting* (ready to merge). Printed separately as ranges; never summed into
+   the main range. The git-only source has no ready signal and prints the total only.
+3. **Trailing window**: ranges come from tasks finished in the last N days (default 90). `backtest`
+   compares windows (30/60/90/all) and reports the best on the locked slice.
+4. Tasks carry `code_lines`, `test_lines`, `doc_lines`, `ready_at` (when known) and `areas`. The
+   `tasks.jsonl` contract in the README is updated; old files without the fields still load.
+
+## Release v0.2 — sizing advisor, ticket mode
+
+`cc-estimate advise --size <S> --paths <planned paths>` (or `--plan <file>` listing several planned
+tasks with paths and size).
+
+- **Split** when the task is above the history's *break point*: the smallest size bucket or area
+  count at which the 80% range more than doubles in width compared with the bucket below. Slices
+  follow area boundaries in dependency order (shared code, then the services using it, then UI,
+  then docs), each with its own estimate.
+- **Merge** when two planned tasks are both XS or S and touch the same area.
+- **Keep** otherwise.
+- **No advice** when history has fewer than 20 tasks on either side of the break point, or when the
+  backtest shows split tasks were not faster in total than single tasks of the same total size.
+- The backtest of the advisor: for past tasks above the break point, compare the total cycle time of
+  sets of tasks closing one parent issue with single tasks of the same total size.
+
+## Release v0.2.x — sizing advisor, diff mode
+
+`cc-estimate advise --diff <base>...<head>`: group changed files by area, order the groups by import
+or path dependency where detectable, and propose stacked pull requests, each under the break point.
+Proposals only; nothing is rewritten.
+
+## Jira source
+
+- **Agent path**: the skill tells an agent with a connected Jira MCP to search issues by JQL, read
+  each issue's status history, and write `tasks.jsonl` rows plus a `key,group,start,end` CSV of
+  non-working statuses (configurable list, default "Blocked", "On Hold"). The first task verifies
+  that the Atlassian MCP exposes status history; if not, the agent path calls the headless command.
+- **Headless path**: `cc-estimate jira-tasks --jql "<query>"` with `JIRA_URL`, `JIRA_EMAIL`,
+  `JIRA_API_TOKEN`. Stdlib HTTP against the Jira Cloud REST API (search with changelog). Start is
+  the first transition into an in-progress category, end is resolution. Non-working statuses become
+  `excluded` spans.
+- Lines and paths come from git by matching the issue key in commit messages, as `git-tasks` does.
+
+## Out of scope
+
+Linear (same two paths later), similar-task retrieval, GitLab and Azure DevOps sources, any
+cross-person reporting.
+
+## Testing
+
+- Every behaviour above has a unit test on synthetic data; no real repository data in the repo.
+- Privacy: one parametrised test runs every CLI command on a fixture with three logins and asserts
+  that only the current user's login appears.
+- Leak test: an estimate does not change when outcomes after its start change.
+- Jira: the REST client is tested against recorded, synthetic JSON responses.
+- CI runs the suite on Python 3.10, 3.12 and 3.13, plus a fresh `pip install` and plugin manifest check.
