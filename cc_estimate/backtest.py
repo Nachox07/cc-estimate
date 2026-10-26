@@ -168,11 +168,12 @@ MIN_SCORED = 10  # fewest estimates a table row is printed for
 
 def split(n, min_history):
     """Tuning starts after `min_history` tasks, or half the history if that is less; the last
-    20% of the rest is the locked slice."""
+    20% of the rest, and at least MIN_SCORED tasks, is the locked slice."""
     if n < MIN_TASKS:
         return None
     first = min(min_history, n // 2)
-    return first, first + int((n - first) * 0.8)
+    rest = n - first
+    return first, n - max(rest - int(rest * 0.8), MIN_SCORED)
 
 
 def pace(h, t):

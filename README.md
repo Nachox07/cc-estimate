@@ -39,7 +39,8 @@ the pull requests closing the same issue.
 **2. Its cycle time counts working hours only.** The clock runs from the first commit to the last
 merge. With the git-only source the end is the merge commit that landed the work when the history has
 one. In a squash-merged history it is the last commit carrying the key: a commit span, which leaves out
-review and merge waiting. Only Mon–Fri, 09:00–18:00 in your timezone counts. Then three things come out:
+review and merge waiting. A tracker key wins over `#123`; in a squash-merged GitHub history with no
+tracker keys, the `(#123)` suffix is the pull request number, so each pull request is its own task. Only Mon–Fri, 09:00–18:00 in your timezone counts. Then three things come out:
 - **absence**: days off, from config or per estimate;
 - **non-working states**: periods a work item was blocked, on hold or waiting in a queue, taken
   from issue labels or from your tracker's status history;
@@ -90,7 +91,7 @@ cp config.example.json cc-estimate.json     # set repo, source, timezone
 **From git only** (Jira, Linear or any key in commit messages; set `"source": "git"`):
 
 ```bash
-cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" --out data/repo.tasks.jsonl
+cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
 
 **From GitHub** (pull requests and the issues they close):
@@ -141,14 +142,17 @@ filed under, and link the commits to it.
 Repo-specific behaviour lives in `cc-estimate.json`: bots to ignore, timezone, absence, labels
 that mean "not working", and the `classifier` hooks for approval and test-suite rules. See
 `config.example.json`. `default_branch` (default `main`) names the branch work lands on.
-`git.key_regex` takes one pattern or a list tried in order.
+`git.key_regex` takes one pattern or a list tried in order; pass `--config` to `git-tasks` to use it.
+`classifier.default_branch` is different: the git ref the classifier reads paths from, such as
+`origin/main`.
 
 ## Privacy
 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
 or numbers: per-person data is used only to log and score your own estimates. The test suite runs
-every offline command on a three-person fixture and fails if another login appears. Cycle time
+`tasks`, `spans`, `backtest`, `estimate`, `score`, `summary` and `git-tasks` on a three-person
+fixture and fails if another login appears. `fetch` writes only to a file. Cycle time
 mostly measures waiting, not effort, so don't use it to compare people.
 
 ## Status and roadmap

@@ -117,7 +117,8 @@ def history_records(n=60):
                         size={"lines": {"code": 40 * i, "tests": 10, "docs": 0}, "changed_files": 3},
                         time={"active_days": 1 + i % 3, "weekdays_span": 2 + i % 4},
                         phases_weekdays={"coding": 1.0, "wait_first_human_review": 0.5, "first_human_review_to_merge": 0.5},
-                        review={"rounds": i % 5, "first_human_review_at": "2026-10-05T15:00:00Z"},
+                        review={"rounds": i % 5, "first_human_review_at": "2026-10-05T15:00:00Z",
+                                "human_reviewers": [LOGINS[(i + 1) % 3]], "ai_review_bots": ["reviewbot"]},
                         ai={}, ci={}, risk_tier="low"))
     return out
 
@@ -141,8 +142,17 @@ class Tasks(unittest.TestCase):
             p["base"] = "trunk" if p["base"] == "main" else p["base"]
         with tempfile.TemporaryDirectory() as tmp:
             d = write(tmp, prs, lks, {"default_branch": "trunk"})
-            rows = (d / "tasks.jsonl").read_text().splitlines()
-        self.assertGreater(len(rows), 0)
+            rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
+        kept = {n for r in rows for n in r["prs"]}
+        self.assertTrue(kept)
+        self.assertTrue(all(prs[n - 1]["base"] == "trunk" for n in kept))
+
+
+class Links(unittest.TestCase):
+    def test_squash_suffix_is_a_cherry_pick_only_off_the_default_branch(self):
+        n = dict(number=9, baseRefName="trunk", headRefName="x", title="fix: y (#3)", body="", mergedAt="2026-10-06T16:00:00Z")
+        self.assertIsNone(links.record(n, {}, "trunk")["cherry_pick_of"])
+        self.assertEqual(links.record({**n, "baseRefName": "release/1"}, {}, "trunk")["cherry_pick_of"], 3)
 
 
 class Scoring(unittest.TestCase):
@@ -311,6 +321,32 @@ class GitSource(unittest.TestCase):
                                       merged=gitsource.merges(d, "main", "2020-01-01"))
         self.assertEqual(rows[0]["end_kind"], "commit")
 
+    def merged_end(self, commit_msg, merges):
+        cs = [dict(sha="1", author="a", at="2026-01-05T09:00:00+00:00", subject=commit_msg, body="", lines=1)]
+        rows, _ = gitsource.build(cs, gitsource.key_patterns(None), merged=[dict(at=at, text=t) for at, t in merges])
+        return rows[0]["end"][:10], rows[0]["end_kind"]
+
+    def test_a_task_ends_at_the_first_merge_after_its_last_commit(self):
+        self.assertEqual(self.merged_end("ABC-1 work", [("2026-01-06T09:00:00+00:00", "Merge branch ABC-1-login"),
+                                                        ("2026-06-01T09:00:00+00:00", "Merge branch ABC-1-followup")]),
+                         ("2026-01-06", "merge"))
+
+    def test_a_merge_commit_pr_number_is_not_a_task_key(self):
+        self.assertEqual(self.merged_end("Refs #12", [("2026-05-01T09:00:00+00:00", "Merge pull request #12 from o/other\n")]),
+                         ("2026-01-05", "commit"))
+        self.assertEqual(self.merged_end("#5 work", [("2026-01-07T09:00:00+00:00", "Merge pull request #40 from o/b\nFixes #5")]),
+                         ("2026-01-07", "merge"))
+
+    def test_git_tasks_reads_key_regex_from_the_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d)
+            Path(d, "a").write_text("a\n"); git("add", "."); git("commit", "-qm", "X-4 and ABC-1", when="2026-10-05T09:00:00+00:00")
+            Path(d, "cfg.json").write_text(json.dumps({"git": {"key_regex": r"\b(X-\d+)\b"}}))
+            with contextlib.redirect_stderr(io.StringIO()):
+                gitsource.main(["--repo-dir", d, "--since", "2020-01-01", "--config", str(Path(d, "cfg.json")),
+                                "--out", str(Path(d, "t.jsonl"))])
+            self.assertEqual(json.loads(Path(d, "t.jsonl").read_text())["id"], "X-4")
+
     def test_commits_order_by_time_across_timezone_offsets(self):
         cs = [dict(sha="1", author="a", at="2026-10-05T10:00:00+02:00", subject="ABC-1 b", body="", lines=1),
               dict(sha="2", author="a", at="2026-10-05T09:30:00+00:00", subject="ABC-1 a", body="", lines=1)]
@@ -393,11 +429,13 @@ class SmallHistory(unittest.TestCase):
     def test_split_scales_down_and_keeps_a_locked_slice(self):
         self.assertEqual(bt.split(100, 200), (50, 90))
         self.assertEqual(bt.split(1000, 200), (200, 840))
+        self.assertEqual(bt.split(40, 200), (20, 30))
         self.assertIsNone(bt.split(39, 200))
 
     def test_fifty_finished_tasks_are_enough_to_run(self):
         out = self.run_backtest(task_rows(71))  # the last 21 days are censored, leaving 50
-        self.assertIn("== LOCKED · all tasks ==", out)
+        locked = out.split("== LOCKED · all tasks ==")[1].split("==")[0]
+        self.assertIn("baseline: repo", locked)
 
     def test_too_few_tasks_says_so(self):
         self.assertIn("too few to backtest", self.run_backtest(task_rows(50)))

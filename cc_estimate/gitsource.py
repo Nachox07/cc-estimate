@@ -14,6 +14,7 @@ from .files import open_out
 # Tried in order, so a tracker key beats the "(#123)" a squash merge appends.
 DEFAULT_KEYS = [r"\b([A-Z][A-Z0-9]+-\d+)\b", r"(?<![\w&])(#\d+)\b"]
 REC, UNIT = "\x1e", "\x1f"
+MERGE_PR = re.compile(r"^Merge pull request #\d+")  # the PR's own number, not the task key
 
 
 def commits(repo_dir, branch, since):
@@ -78,7 +79,7 @@ def build(cs, patterns, ignore_re=None, merged=()):
         groups[key].append(c)
     landed = defaultdict(list)
     for m in merged:
-        key = find_key(m["text"], patterns)
+        key = find_key(MERGE_PR.sub("", m["text"]), patterns)
         if key:
             landed[key].append(m["at"])
     when = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))  # 3.10 rejects "Z"
@@ -90,7 +91,7 @@ def build(cs, patterns, ignore_re=None, merged=()):
             authors[c["author"]] += 1
         last = cl[-1]["at"]
         after = [m for m in landed.get(key, []) if when(m) >= when(last)]
-        end = max(after, key=when) if after else last
+        end = min(after, key=when) if after else last
         rows.append(dict(id=key, title=cl[0]["subject"], author=max(authors, key=authors.get), labels=[],
                          start=cl[0]["at"], end=end, end_kind="merge" if after else "commit",
                          lines=sum(c.get("lines", 0) for c in cl), commits=len(cl), excluded={}))
@@ -106,9 +107,11 @@ def main(argv=None):
     ap.add_argument("--since", default="120 days ago")
     ap.add_argument("--key-regex", action="append", help="repeatable; tried in order; first group is the task key")
     ap.add_argument("--ignore-authors", help="regex of bot author emails to skip")
+    ap.add_argument("--config", help="cc-estimate.json; its git.key_regex is used when --key-regex is not given")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), key_patterns(a.key_regex),
+    cfg = json.loads(open(a.config).read()) if a.config else {}
+    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex")),
                           re.compile(a.ignore_authors) if a.ignore_authors else None,
                           merged=merges(a.repo_dir, a.branch, a.since))
     with open_out(a.out) as f:
