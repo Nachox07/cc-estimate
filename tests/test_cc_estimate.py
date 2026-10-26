@@ -125,6 +125,29 @@ class Scoring(unittest.TestCase):
             got = estimate.actual_for(rec, MAD, {"default_branch": "trunk"})
         self.assertEqual(got["prs"], [5])
 
+    def test_github_source_takes_issue_numbers_only(self):
+        self.assertEqual(estimate.task_key("#123", "github"), 123)
+        self.assertEqual(estimate.task_key(123, None), 123)
+        with self.assertRaises(SystemExit):
+            estimate.task_key("ABC-1", "github")
+
+    def test_git_source_takes_any_key_and_reads_a_bare_number_as_hash(self):
+        self.assertEqual(estimate.task_key("123", "git"), "#123")
+        self.assertEqual(estimate.task_key("ABC-1", "git"), "ABC-1")
+
+    def test_score_skips_an_old_github_row_with_a_tracker_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "cfg.json").write_text(json.dumps({"repo": "acme/widgets", "data_dir": "."}))
+            (d / "estimates.jsonl").write_text(json.dumps(dict(
+                id="x1", author="alice", repo="acme/widgets", size="M", issue="ABC-1", pr=None,
+                range_h=[1, 5, 20], baseline_h=[0, 3, 30], actual=None)) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["score", "--config", str(d / "cfg.json")])
+        self.assertIn("1 logged, 0 finished", buf.getvalue())
+
 
 class Backtest(unittest.TestCase):
     def setUp(self):
@@ -209,13 +232,24 @@ class GitSource(unittest.TestCase):
                 Path(d, f"f{i}.txt").write_text("x\n" * (i + 1))
                 git("add", ".")
                 git("commit", "-qm", msg.replace("\\n", "\n"), GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
-            rows, skipped = gitsource.build(gitsource.commits(d, "HEAD", "2020-01-01"), re.compile(gitsource.DEFAULT_KEY))
+            rows, skipped = gitsource.build(gitsource.commits(d, "HEAD", "2020-01-01"), gitsource.key_patterns(None))
         by = {r["id"]: r for r in rows}
         self.assertEqual(skipped, 1)
         self.assertEqual(by["ABC-1"]["commits"], 2)
         self.assertEqual(by["ABC-1"]["lines"], 1 + 3)
         self.assertEqual(by["ABC-1"]["start"][:10], "2026-10-05")
         self.assertEqual(by["ABC-1"]["end"][:10], "2026-10-06")
+
+    def test_tracker_keys_win_over_hash_numbers_and_hash_numbers_work_alone(self):
+        pats = gitsource.key_patterns(None)
+        self.assertEqual(gitsource.find_key("fix login (#12)", pats), "#12")
+        self.assertEqual(gitsource.find_key("ABC-1 fix login (#13)", pats), "ABC-1")
+        self.assertEqual(gitsource.find_key("fix (#14)\n\nRefs ABC-2", pats), "ABC-2")
+        self.assertIsNone(gitsource.find_key("quote &#39; in text", pats))
+
+    def test_a_single_string_key_regex_still_works(self):
+        pats = gitsource.key_patterns(r"\b(X-\d+)\b")
+        self.assertEqual(gitsource.find_key("X-4 and ABC-1", pats), "X-4")
 
 
 class Spans(unittest.TestCase):

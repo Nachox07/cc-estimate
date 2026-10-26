@@ -41,6 +41,19 @@ def me(cfg=None):
     return gh("api", "user", "--jq", ".login").strip()
 
 
+def task_key(issue, source):
+    """The key a logged estimate is scored by. GitHub scores issue numbers; git scores any key,
+    reading a bare number as `#N`."""
+    s = str(issue).strip()
+    if source == "git":
+        return f"#{s}" if s.isdigit() else s
+    n = s.lstrip("#")
+    if not n.isdigit():
+        sys.exit(f"--issue {s}: the GitHub source scores issue numbers. "
+                 "Set \"source\": \"git\" in the config to use tracker keys.")
+    return int(n)
+
+
 def ranges(tasks_path, tz, size, cfg):
     rows = bt.load(tasks_path, tz, cfg)
     cut = max(r["end"] for r in rows) - timedelta(days=CENSOR_DAYS)
@@ -73,6 +86,7 @@ def print_needs(paths, cfg):
 
 
 def cmd_estimate(a, cfg):
+    issue = task_key(a.issue, cfg.get("source")) if a.issue else None
     tz = ZoneInfo(cfg.get("timezone", "UTC"))
     (lo, med, hi), n, base, newest = ranges(a.tasks, tz, a.size, cfg)
     print(f"Size {a.size}: {n} finished tasks in history (data up to {newest:%Y-%m-%d}).")
@@ -85,7 +99,7 @@ def cmd_estimate(a, cfg):
     if not a.log:
         return
     rec = dict(id=uuid.uuid4().hex[:8], at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-               author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=a.issue, text=a.text, pr=None,
+               author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=issue, text=a.text, pr=None,
                range_h=[lo, med, hi], baseline_h=base, n=n, off=a.off or [], actual=None)
     with open_out(a.log_file, "a") as f:
         f.write(json.dumps(rec) + "\n")
@@ -129,8 +143,9 @@ def actual_for_git(rec, tz, cfg):
     key has had no commit for `quiet_days` (default 5) days."""
     g = cfg.get("git", {})
     rows, _ = gs.build(gs.commits(g.get("repo_dir", "."), g.get("branch", "HEAD"), "365 days ago"),
-                       re.compile(g.get("key_regex", gs.DEFAULT_KEY)))
-    row = next((r for r in rows if r["id"] == str(rec.get("issue"))), None)
+                       gs.key_patterns(g.get("key_regex")))
+    key = task_key(rec.get("issue"), "git")
+    row = next((r for r in rows if r["id"] == key), None)
     if not row:
         return None
     end = bt.parse(row["end"])
@@ -153,7 +168,7 @@ def actual_for(rec, tz, cfg):
     if rec.get("pr"):
         prs = [gql(PR_Q, o=owner, r=name, n=rec["pr"])["pullRequest"]]
     elif rec.get("issue"):
-        issue = gql(ISSUE_Q, o=owner, r=name, n=int(str(rec["issue"]).lstrip("#")))["issue"]
+        issue = gql(ISSUE_Q, o=owner, r=name, n=task_key(rec["issue"], "github"))["issue"]
         prs = issue["closedByPullRequestsReferences"]["nodes"]
         blocked += blocked_spans(issue.get("labelEvents"), issue.get("closedAt"))
     else:

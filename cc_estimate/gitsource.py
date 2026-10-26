@@ -1,5 +1,5 @@
 """Build tasks from local git alone: no GitHub, works with any tracker whose keys appear in
-commit messages (Jira `ABC-123`, Linear `ENG-42`, GitHub `#123`).
+commit messages (Jira `ABC-123`, Linear `ENG-42`, or `#123`).
 
 A task is every commit on the branch whose message carries the same key. It starts at the first
 commit and ends at the last. Commits without a key are skipped and counted.
@@ -8,7 +8,8 @@ import argparse, json, re, subprocess, sys
 from collections import defaultdict
 from .files import open_out
 
-DEFAULT_KEY = r"\b([A-Z][A-Z0-9]+-\d+)\b"
+# Tried in order, so a tracker key beats the "(#123)" a squash merge appends.
+DEFAULT_KEYS = [r"\b([A-Z][A-Z0-9]+-\d+)\b", r"(?<![\w&])(#\d+)\b"]
 REC, UNIT = "\x1e", "\x1f"
 
 
@@ -34,17 +35,31 @@ def commits(repo_dir, branch, since):
     return parsed
 
 
-def build(cs, key_re, ignore_re=None):
+def key_patterns(spec):
+    """Key regexes from config or the CLI: one string or a list; the first group is the task key."""
+    spec = spec or DEFAULT_KEYS
+    return [re.compile(p) for p in ([spec] if isinstance(spec, str) else spec)]
+
+
+def find_key(text, patterns):
+    for p in patterns:
+        m = p.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def build(cs, patterns, ignore_re=None):
     groups, skipped = defaultdict(list), 0
     for c in cs:
         text = c["subject"] + "\n" + c["body"]
         if ignore_re and ignore_re.search(c["author"]):
             continue
-        m = key_re.search(text)
-        if not m:
+        key = find_key(text, patterns)
+        if not key:
             skipped += 1
             continue
-        groups[m.group(1)].append(c)
+        groups[key].append(c)
     rows = []
     for key, cl in groups.items():
         cl.sort(key=lambda c: c["at"])
@@ -64,11 +79,11 @@ def main(argv=None):
     ap.add_argument("--repo-dir", default=".")
     ap.add_argument("--branch", default="HEAD")
     ap.add_argument("--since", default="120 days ago")
-    ap.add_argument("--key-regex", default=DEFAULT_KEY, help="first group is the task key")
+    ap.add_argument("--key-regex", action="append", help="repeatable; tried in order; first group is the task key")
     ap.add_argument("--ignore-authors", help="regex of bot author emails to skip")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), re.compile(a.key_regex),
+    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), key_patterns(a.key_regex),
                           re.compile(a.ignore_authors) if a.ignore_authors else None)
     with open_out(a.out) as f:
         for r in rows:
