@@ -81,7 +81,7 @@ def build(cs, patterns, ignore_re=None, merged=()):
         key = find_key(m["text"], patterns)
         if key:
             landed[key].append(m["at"])
-    when = datetime.fromisoformat
+    when = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))  # 3.10 rejects "Z"
     rows = []
     for key, cl in groups.items():
         cl.sort(key=lambda c: when(c["at"]))
