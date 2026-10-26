@@ -1,0 +1,11 @@
+{
+  "name": "cc-estimate",
+  "owner": {"name": "Nachox07"},
+  "plugins": [
+    {
+      "name": "cc-estimate",
+      "source": "./plugin/cc-estimate",
+      "description": "Estimate how long a task will take from your team's own delivery history, and score the estimates."
+    }
+  ]
+}

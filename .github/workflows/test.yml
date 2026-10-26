@@ -14,3 +14,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m venv /tmp/venv && /tmp/venv/bin/pip install .
+      - name: The installed command runs outside the source tree
+        working-directory: /tmp
+        run: |
+          /tmp/venv/bin/cc-estimate --help
+          /tmp/venv/bin/cc-estimate git-tasks --repo-dir "$GITHUB_WORKSPACE" --since "10 years ago" --out /tmp/new/tasks.jsonl
+          test -f /tmp/new/tasks.jsonl

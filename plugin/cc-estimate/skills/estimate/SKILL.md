@@ -1,5 +1,5 @@
 ---
-name: cc-estimate
+name: estimate
 description: Estimate how long a task will take from the team's own delivery history — an 80% cycle-time interval in working days by size, logged and later scored against what actually happened. Use when asked "how long will this take", "estimate this ticket", "size this task", "how accurate are my estimates", "/estimate". Only the user's own estimates are logged or scored; never compare people.
 ---
 
@@ -9,6 +9,8 @@ description: Estimate how long a task will take from the team's own delivery his
 of the same size. Working hours exclude weekends, nights, absence and non-working states such as
 blocked. Cycle time is mostly waiting, so intervals are wide. Say so. Never narrow an interval by
 hand, and never add a point estimate the tool did not print.
+
+The skill runs the `cc-estimate` command. If it is not installed: `pipx install git+https://github.com/Nachox07/cc-estimate`.
 
 ## Steps
 
