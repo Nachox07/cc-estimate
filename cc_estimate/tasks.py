@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Group merged PRs into tasks. A task is the set of main-branch PRs sharing an issue.
+"""Group merged PRs into tasks. A task is the set of default-branch PRs sharing an issue.
 
 Grouping key: the PR's lowest-numbered closing issue; a PR closing nothing is its own task.
 Body references ("Refs #N") are not used: most cite umbrella issues or rules.
@@ -22,11 +22,12 @@ def main(argv=None):
     cfg = json.loads(Path(a.config).read_text())
     bots = set(cfg.get("bot_logins", [])) | set(cfg.get("automation_logins", []))
     bot_re = [re.compile(p) for p in cfg.get("bot_login_patterns", [r"\[bot\]$"])]
+    branch = cfg.get("default_branch", "main")
     prs = {r["number"]: r for r in map(json.loads, Path(a.prs).read_text().splitlines())}
     links = {r["number"]: r for r in map(json.loads, Path(a.links).read_text().splitlines())}
 
     keep = [n for n, r in prs.items()
-            if r["base"] == "main" and r.get("merged_at") and r["author"] not in bots
+            if r["base"] == branch and r.get("merged_at") and r["author"] not in bots
             and not any(b.search(r["author"] or "") for b in bot_re)]
 
     # One key per PR, no transitive chaining: chaining through shared references merged

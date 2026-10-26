@@ -1,6 +1,7 @@
 {
   "repo": "your-org/your-repo",
   "source": "github",
+  "default_branch": "main",
   "timezone": "UTC",
   "data_dir": "data",
   "git": {

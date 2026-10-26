@@ -106,6 +106,25 @@ class Tasks(unittest.TestCase):
             rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
         self.assertEqual([r["prs"] for r in rows], [[1, 2]])
 
+    def test_grouping_keeps_prs_into_the_configured_default_branch(self):
+        prs, lks = synthetic(60)
+        for p in prs:
+            p["base"] = "trunk" if p["base"] == "main" else p["base"]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, prs, lks, {"default_branch": "trunk"})
+            rows = (d / "tasks.jsonl").read_text().splitlines()
+        self.assertGreater(len(rows), 0)
+
+
+class Scoring(unittest.TestCase):
+    def test_scoring_uses_the_configured_default_branch(self):
+        pr = {"number": 5, "mergedAt": "2026-10-06T16:00:00Z", "createdAt": "2026-10-05T09:00:00Z",
+              "baseRefName": "trunk", "commits": {"nodes": []}, "labelEvents": {"nodes": []}}
+        rec = {"repo": "acme/widgets", "pr": 5, "author": "alice"}
+        with mock.patch.object(estimate, "gql", return_value={"pullRequest": pr}):
+            got = estimate.actual_for(rec, MAD, {"default_branch": "trunk"})
+        self.assertEqual(got["prs"], [5])
+
 
 class Backtest(unittest.TestCase):
     def setUp(self):

@@ -144,7 +144,7 @@ def actual_for_git(rec, tz, cfg):
 
 def actual_for(rec, tz, cfg):
     """Work hours from the first commit or PR open (whichever is earlier) to the last merge,
-    over the main-branch PRs that delivered the task, minus absence days and blocked spans.
+    over the default-branch PRs that delivered the task, minus absence days and blocked spans.
     None while any is unmerged."""
     if cfg.get("source") == "git":
         return actual_for_git(rec, tz, cfg)
@@ -158,7 +158,7 @@ def actual_for(rec, tz, cfg):
         blocked += blocked_spans(issue.get("labelEvents"), issue.get("closedAt"))
     else:
         return None
-    prs = [p for p in prs if p["baseRefName"] == "main"]
+    prs = [p for p in prs if p["baseRefName"] == cfg.get("default_branch", "main")]
     if not prs or any(not p["mergedAt"] for p in prs):
         return None
     starts = [p["createdAt"] for p in prs] + [c["commit"]["authoredDate"] for p in prs for c in p["commits"]["nodes"]]
