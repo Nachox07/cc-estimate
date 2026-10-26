@@ -366,5 +366,31 @@ class ThinHistory(unittest.TestCase):
         self.assertIn("not enough history yet", str(e.exception))
 
 
+class SmallHistory(unittest.TestCase):
+    def run_backtest(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", rows)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bt.main(["--in", str(Path(tmp) / "t.jsonl")])
+            return buf.getvalue()
+
+    def test_split_scales_down_and_keeps_a_locked_slice(self):
+        self.assertEqual(bt.split(100, 200), (50, 90))
+        self.assertEqual(bt.split(1000, 200), (200, 840))
+        self.assertIsNone(bt.split(39, 200))
+
+    def test_fifty_finished_tasks_are_enough_to_run(self):
+        out = self.run_backtest(task_rows(71))  # the last 21 days are censored, leaving 50
+        self.assertIn("== LOCKED · all tasks ==", out)
+
+    def test_too_few_tasks_says_so(self):
+        self.assertIn("too few to backtest", self.run_backtest(task_rows(50)))
+
+    def test_empty_or_all_recent_history_says_so(self):
+        self.assertIn("too few to backtest", self.run_backtest([]))
+        self.assertIn("too few to backtest", self.run_backtest(task_rows(10)))
+
+
 if __name__ == "__main__":
     unittest.main()
