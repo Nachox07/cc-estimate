@@ -9,6 +9,7 @@ Bot and automation authors are dropped.
 import argparse, json, re
 from pathlib import Path
 from collections import defaultdict
+from .files import open_out
 
 
 def main(argv=None):
@@ -35,7 +36,7 @@ def main(argv=None):
         closing = sorted(i["number"] for i in links.get(n, {}).get("closing", []))
         groups[("issue", closing[0]) if closing else ("pr", n)].append(n)
 
-    with open(a.out, "w") as f:
+    with open_out(a.out) as f:
         for root, ns in groups.items():
             ns.sort(key=lambda n: prs[n]["created_at"])
             first = prs[ns[0]]

@@ -19,6 +19,7 @@ from . import backtest as bt
 from . import classify as cl
 from . import gitsource as gs
 from .links import LABEL_EVENTS, blocked_spans
+from .files import open_out
 
 LEVEL = 0.8
 LO_P, HI_P = (1 - LEVEL) / 2, 1 - (1 - LEVEL) / 2
@@ -86,7 +87,7 @@ def cmd_estimate(a, cfg):
     rec = dict(id=uuid.uuid4().hex[:8], at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=a.issue, text=a.text, pr=None,
                range_h=[lo, med, hi], baseline_h=base, n=n, off=a.off or [], actual=None)
-    with open(a.log_file, "a") as f:
+    with open_out(a.log_file, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(f"Logged as {rec['id']}." + ("" if a.issue else f" No issue given: run `cc-estimate attach {rec['id']} --pr <N>` once the PR exists."))
 

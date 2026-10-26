@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import date, timedelta
 
 from . import history as h
+from .files import open_out
 
 LABEL_EVENTS = """labelEvents: timelineItems(first: 50, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) { nodes {
   __typename ... on LabeledEvent { createdAt label { name } } ... on UnlabeledEvent { createdAt label { name } } } }"""
@@ -107,7 +108,7 @@ def main(argv=None):
     seen = {}
     for n in rows:
         seen[n["number"]] = record(n, groups)
-    with open(a.out, "w") as f:
+    with open_out(a.out) as f:
         for r in sorted(seen.values(), key=lambda r: r["number"]):
             f.write(json.dumps(r) + "\n")
     print(f"wrote {len(seen)} rows to {a.out}; gh calls {h.STATS['calls']} cache {h.STATS['cache_hits']} points {h.STATS['points']}",

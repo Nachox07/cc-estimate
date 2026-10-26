@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from .files import open_out
 
 HERE = Path(__file__).resolve().parent
 
@@ -572,7 +573,7 @@ def cmd_fetch(a):
             tiers = list(ex.map(lambda rp: risk_tier(rp[1], cfg), recs))
         for (rec, _), t in zip(recs, tiers):
             rec["risk_tier"] = t
-    out = open(a.out, "w") if a.out else sys.stdout
+    out = open_out(a.out) if a.out else sys.stdout
     for rec, _ in sorted(recs, key=lambda x: x[0]["merged_at"]):
         out.write(json.dumps(rec) + "\n")
     if a.out:
@@ -739,6 +740,7 @@ def cmd_summary(a):
         L.append("\n" + Path(a.notes).read_text())
     text = "\n".join(L) + "\n"
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(text)
     else:
         print(text)

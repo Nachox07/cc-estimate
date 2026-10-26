@@ -6,6 +6,7 @@ commit and ends at the last. Commits without a key are skipped and counted.
 """
 import argparse, json, re, subprocess, sys
 from collections import defaultdict
+from .files import open_out
 
 DEFAULT_KEY = r"\b([A-Z][A-Z0-9]+-\d+)\b"
 REC, UNIT = "\x1e", "\x1f"
@@ -69,7 +70,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     rows, skipped = build(commits(a.repo_dir, a.branch, a.since), re.compile(a.key_regex),
                           re.compile(a.ignore_authors) if a.ignore_authors else None)
-    with open(a.out, "w") as f:
+    with open_out(a.out) as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
     print(f"{len(rows)} tasks; {skipped} commits had no key and were skipped", file=sys.stderr)

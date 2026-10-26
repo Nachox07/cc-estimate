@@ -209,5 +209,25 @@ class Spans(unittest.TestCase):
         self.assertAlmostEqual(bt.biz_hours(t("2026-10-05 09:00"), t("2026-10-05 18:00"), MAD, blocked=blocked), 7)
 
 
+class OutputFiles(unittest.TestCase):
+    def test_tasks_creates_a_missing_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, *synthetic(30), {})
+            out = d / "new" / "dir" / "tasks.jsonl"
+            with contextlib.redirect_stdout(io.StringIO()):
+                tasks.main(["--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"),
+                            "--config", str(d / "cfg.json"), "--out", str(out)])
+            self.assertTrue(out.exists())
+
+    def test_logging_an_estimate_creates_the_data_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, *synthetic(), {})
+            (d / "cfg.json").write_text(json.dumps({"repo": "acme/widgets", "data_dir": "not/yet"}))
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["estimate", "--config", str(d / "cfg.json"), "--tasks", str(d / "tasks.jsonl"),
+                               "--size", "M", "--log"])
+            self.assertTrue((d / "not" / "yet" / "estimates.jsonl").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
