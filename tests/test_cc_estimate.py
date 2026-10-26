@@ -107,6 +107,21 @@ def write_tasks(path, rows):
     Path(path).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
+def history_records(n=60):
+    """PR records shaped like `fetch` output, authored by the three fixture logins."""
+    out = []
+    for i in range(1, n + 1):
+        out.append(dict(number=i, title=f"feat: change {i}", author=LOGINS[i % 3], commits_by_author=1,
+                        created_at="2026-10-05T09:00:00Z", merged_at="2026-10-06T09:00:00Z",
+                        first_commit_at="2026-10-05T08:00:00Z", last_commit_at="2026-10-06T08:00:00Z", commits=2,
+                        size={"lines": {"code": 40 * i, "tests": 10, "docs": 0}, "changed_files": 3},
+                        time={"active_days": 1 + i % 3, "weekdays_span": 2 + i % 4},
+                        phases_weekdays={"coding": 1.0, "wait_first_human_review": 0.5, "first_human_review_to_merge": 0.5},
+                        review={"rounds": i % 5, "first_human_review_at": "2026-10-05T15:00:00Z"},
+                        ai={}, ci={}, risk_tier="low"))
+    return out
+
+
 class Tasks(unittest.TestCase):
     def test_grouping_drops_bots_and_release_branches_and_joins_shared_issues(self):
         prs = [dict(number=n, title="feat: a", author=a, labels=[], base=b, created_at="2026-10-05T09:00:00Z",
@@ -390,6 +405,35 @@ class SmallHistory(unittest.TestCase):
     def test_empty_or_all_recent_history_says_so(self):
         self.assertIn("too few to backtest", self.run_backtest([]))
         self.assertIn("too few to backtest", self.run_backtest(task_rows(10)))
+
+
+class EveryCommandPrivacy(unittest.TestCase):
+    """Every command that runs without network, on a three-person fixture, prints no other login."""
+
+    def test_no_command_prints_another_login(self):
+        from cc_estimate.__main__ import main as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, *synthetic(), {"repo": "acme/widgets", "timezone": "Europe/Madrid", "data_dir": "."})
+            (d / "widgets.tasks.jsonl").write_text((d / "tasks.jsonl").read_text())
+            (d / "h.jsonl").write_text("".join(json.dumps(r) + "\n" for r in history_records()))
+            (d / "s.csv").write_text("key,group,start,end\n1,blocked,2026-06-01T10:00:00Z,2026-06-01T12:00:00Z\n")
+            cfg = str(d / "cfg.json")
+            commands = {
+                "tasks": ["tasks", "--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"), "--config", cfg, "--out", str(d / "t2.jsonl")],
+                "spans": ["spans", "--tasks", str(d / "tasks.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "t3.jsonl")],
+                "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg],
+                "estimate": ["estimate", "--size", "M", "--config", cfg],
+                "summary": ["summary", "--in", str(d / "h.jsonl"), "--focus", "3"],
+                "git-tasks": ["git-tasks", "--repo-dir", str(Path(__file__).resolve().parents[1]), "--since", "10 years ago",
+                              "--out", str(d / "g.jsonl")],
+            }
+            for name, args in commands.items():
+                with self.subTest(command=name):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        cli(args)
+                    for login in LOGINS:
+                        self.assertNotIn(login, buf.getvalue())
 
 
 if __name__ == "__main__":

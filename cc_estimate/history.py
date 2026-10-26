@@ -720,10 +720,10 @@ def cmd_summary(a):
         L.append(f"| {lab} | {ph('coding')} | {ph('wait_first_human_review')} | {ph('first_human_review_to_merge')} | "
                  f"{sum(1 for r in rs if not r['review']['first_human_review_at'])} |")
     L.append("\n## Ten largest PRs by changed code lines\n")
-    L.append("| PR | Author | Code lines | Tests | Docs | Files | Active days | Weekdays | Rounds |\n|---|---|---|---|---|---|---|---|---|")
+    L.append("| PR | Code lines | Tests | Docs | Files | Active days | Weekdays | Rounds |\n|---|---|---|---|---|---|---|---|")
     for r in sorted(recs_all, key=lambda r: -r["size"]["lines"]["code"])[:10]:
         s = r["size"]
-        L.append(f"| #{r['number']} | {r['author']} | {s['lines']['code']} | {s['lines']['tests']} | {s['lines']['docs']} | "
+        L.append(f"| #{r['number']} | {s['lines']['code']} | {s['lines']['tests']} | {s['lines']['docs']} | "
                  f"{s['changed_files']} | {r['time']['active_days']} | {r['time']['weekdays_span']} | {r['review']['rounds']} |")
     if a.focus:
         L.append("")
@@ -733,7 +733,7 @@ def cmd_summary(a):
                 L.append(f"## PR #{num}\n\nNot in the data set.")
                 continue
             L.append(f"## PR #{num}: {r['title']}\n")
-            L.append("```json\n" + json.dumps({k: r[k] for k in ("author", "created_at", "merged_at", "first_commit_at",
+            L.append("```json\n" + json.dumps({k: r[k] for k in ("created_at", "merged_at", "first_commit_at",
                      "last_commit_at", "size", "commits", "commits_by_author", "time", "phases_weekdays", "review", "ai", "ci", "risk_tier")},
                      indent=1) + "\n```")
     if a.notes and Path(a.notes).exists():
