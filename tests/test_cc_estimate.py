@@ -251,6 +251,43 @@ class GitSource(unittest.TestCase):
         pats = gitsource.key_patterns(r"\b(X-\d+)\b")
         self.assertEqual(gitsource.find_key("X-4 and ABC-1", pats), "X-4")
 
+    def repo(self, d):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+               "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+        def git(*args, when=None):
+            e = {**env, **({"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when} if when else {})}
+            subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env=e)
+        git("init", "-q", "-b", "main")
+        return git
+
+    def test_a_merged_branch_ends_at_its_merge_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d)
+            Path(d, "a").write_text("a\n"); git("add", "."); git("commit", "-qm", "init", when="2026-10-01T09:00:00+00:00")
+            git("checkout", "-qb", "ABC-1-login")
+            Path(d, "b").write_text("b\n"); git("add", "."); git("commit", "-qm", "ABC-1 work", when="2026-10-05T09:00:00+00:00")
+            git("checkout", "-q", "main")
+            git("merge", "-q", "--no-ff", "ABC-1-login", "-m", "Merge branch ABC-1-login", when="2026-10-07T15:00:00+00:00")
+            pats = gitsource.key_patterns(None)
+            rows, _ = gitsource.build(gitsource.commits(d, "main", "2020-01-01"), pats,
+                                      merged=gitsource.merges(d, "main", "2020-01-01"))
+        row = next(r for r in rows if r["id"] == "ABC-1")
+        self.assertEqual((row["end"][:10], row["end_kind"]), ("2026-10-07", "merge"))
+
+    def test_without_a_merge_commit_the_task_is_a_commit_span(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d)
+            Path(d, "a").write_text("a\n"); git("add", "."); git("commit", "-qm", "ABC-1 work", when="2026-10-05T09:00:00+00:00")
+            rows, _ = gitsource.build(gitsource.commits(d, "main", "2020-01-01"), gitsource.key_patterns(None),
+                                      merged=gitsource.merges(d, "main", "2020-01-01"))
+        self.assertEqual(rows[0]["end_kind"], "commit")
+
+    def test_commits_order_by_time_across_timezone_offsets(self):
+        cs = [dict(sha="1", author="a", at="2026-10-05T10:00:00+02:00", subject="ABC-1 b", body="", lines=1),
+              dict(sha="2", author="a", at="2026-10-05T09:30:00+00:00", subject="ABC-1 a", body="", lines=1)]
+        rows, _ = gitsource.build(cs, gitsource.key_patterns(None))
+        self.assertEqual((rows[0]["title"], rows[0]["end"]), ("ABC-1 b", "2026-10-05T09:30:00+00:00"))
+
 
 class Spans(unittest.TestCase):
     def test_tracker_spans_are_subtracted_by_key(self):

@@ -142,8 +142,9 @@ def actual_for_git(rec, tz, cfg):
     """Git-only source: the task is the commits carrying its key. It counts as finished once the
     key has had no commit for `quiet_days` (default 5) days."""
     g = cfg.get("git", {})
-    rows, _ = gs.build(gs.commits(g.get("repo_dir", "."), g.get("branch", "HEAD"), "365 days ago"),
-                       gs.key_patterns(g.get("key_regex")))
+    repo_dir, branch = g.get("repo_dir", "."), g.get("branch", "HEAD")
+    rows, _ = gs.build(gs.commits(repo_dir, branch, "365 days ago"), gs.key_patterns(g.get("key_regex")),
+                       merged=gs.merges(repo_dir, branch, "365 days ago"))
     key = task_key(rec.get("issue"), "git")
     row = next((r for r in rows if r["id"] == key), None)
     if not row:
@@ -154,7 +155,8 @@ def actual_for_git(rec, tz, cfg):
     start = bt.parse(row["start"])
     off = bt.off_dates(cfg, rec["author"]) | bt.expand_dates(rec.get("off", []))
     return dict(hours=round(bt.biz_hours(start, end, tz, off), 1), hours_raw=round(bt.biz_hours(start, end, tz), 1),
-                start=start.isoformat(), end=end.isoformat(), commits=row["commits"])
+                start=start.isoformat(), end=end.isoformat(), commits=row["commits"],
+                end_kind=row["end_kind"])
 
 
 def actual_for(rec, tz, cfg):
