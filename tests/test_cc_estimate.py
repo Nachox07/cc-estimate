@@ -93,6 +93,20 @@ def write(tmp, prs, lks, cfg):
     return d
 
 
+def task_rows(n, lines=100, every_h=24, start=datetime(2026, 6, 1, 9, tzinfo=UTC)):
+    """Finished tasks of one size, one every `every_h` hours, lasting 4-16 hours."""
+    out = []
+    for i in range(n):
+        s = start + timedelta(hours=i * every_h)
+        out.append(dict(id=i + 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                        end=(s + timedelta(hours=4 + 3 * (i % 5))).isoformat(), lines=lines, excluded={}))
+    return out
+
+
+def write_tasks(path, rows):
+    Path(path).write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
 class Tasks(unittest.TestCase):
     def test_grouping_drops_bots_and_release_branches_and_joins_shared_issues(self):
         prs = [dict(number=n, title="feat: a", author=a, labels=[], base=b, created_at="2026-10-05T09:00:00Z",
@@ -317,6 +331,39 @@ class OutputFiles(unittest.TestCase):
                 estimate.main(["estimate", "--config", str(d / "cfg.json"), "--tasks", str(d / "tasks.jsonl"),
                                "--size", "M", "--log"])
             self.assertTrue((d / "not" / "yet" / "estimates.jsonl").exists())
+
+
+class ThinHistory(unittest.TestCase):
+    def run_estimate(self, rows, *extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "cfg.json").write_text(json.dumps({"repo": "acme/widgets", "data_dir": "."}))
+            if rows is not None:
+                write_tasks(d / "widgets.tasks.jsonl", rows)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                estimate.main(["estimate", "--config", str(d / "cfg.json"), *extra])
+            return buf.getvalue()
+
+    def test_a_size_with_no_history_falls_back_to_the_size_blind_range(self):
+        out = self.run_estimate(task_rows(80, lines=10), "--size", "XL")
+        self.assertIn("Not enough history for size XL", out)
+        self.assertIn("Without a size:", out)
+
+    def test_missing_history_file_names_the_file(self):
+        with self.assertRaises(SystemExit) as e:
+            self.run_estimate(None, "--size", "M")
+        self.assertIn("no history at", str(e.exception))
+
+    def test_empty_history_file_says_so(self):
+        with self.assertRaises(SystemExit) as e:
+            self.run_estimate([], "--size", "M")
+        self.assertIn("has no tasks", str(e.exception))
+
+    def test_history_younger_than_the_censor_window_says_so(self):
+        with self.assertRaises(SystemExit) as e:
+            self.run_estimate(task_rows(10), "--size", "XS")
+        self.assertIn("not enough history yet", str(e.exception))
 
 
 if __name__ == "__main__":

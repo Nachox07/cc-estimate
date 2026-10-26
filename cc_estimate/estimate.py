@@ -25,6 +25,7 @@ LEVEL = 0.8
 LO_P, HI_P = (1 - LEVEL) / 2, 1 - (1 - LEVEL) / 2
 HOURS_PER_DAY = bt.DAY1 - bt.DAY0
 CENSOR_DAYS = 21
+MIN_N = 5
 
 
 def gh(*args):
@@ -55,14 +56,20 @@ def task_key(issue, source):
 
 
 def ranges(tasks_path, tz, size, cfg):
+    p = Path(tasks_path)
+    if not p.exists():
+        sys.exit(f"no history at {p}: build it first (README, Quick start).")
     rows = bt.load(tasks_path, tz, cfg)
-    cut = max(r["end"] for r in rows) - timedelta(days=CENSOR_DAYS)
-    rows = [r for r in rows if r["start"] <= cut]  # recent starts: only the fast ones have finished
-    same = [r["y"] for r in rows if r["size"] == size]
-    allr = [r["y"] for r in rows]
+    if not rows:
+        sys.exit(f"{p} has no tasks.")
     newest = max(r["end"] for r in rows)
+    cut = newest - timedelta(days=CENSOR_DAYS)
+    rows = [r for r in rows if r["start"] <= cut]  # recent starts: only the fast ones have finished
+    if len(rows) < MIN_N:
+        sys.exit(f"Only {len(rows)} finished tasks started before {cut:%Y-%m-%d}: not enough history yet.")
+    same = [r["y"] for r in rows if r["size"] == size]
     rng = lambda ys: [round(bt.q(ys, LO_P), 1), round(bt.q(ys, 0.5), 1), round(bt.q(ys, HI_P), 1)]
-    return rng(same), len(same), rng(allr), newest
+    return (rng(same) if len(same) >= MIN_N else None), len(same), rng([r["y"] for r in rows]), newest
 
 
 def days(h):
@@ -88,19 +95,25 @@ def print_needs(paths, cfg):
 def cmd_estimate(a, cfg):
     issue = task_key(a.issue, cfg.get("source")) if a.issue else None
     tz = ZoneInfo(cfg.get("timezone", "UTC"))
-    (lo, med, hi), n, base, newest = ranges(a.tasks, tz, a.size, cfg)
+    sized, n, base, newest = ranges(a.tasks, tz, a.size, cfg)
     print(f"Size {a.size}: {n} finished tasks in history (data up to {newest:%Y-%m-%d}).")
-    print(f"80% range: {lo}-{hi} work hours ({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
-    print(f"Without a size: {base[0]}-{base[2]} h.")
-    if n < 20:
-        print("Fewer than 20 tasks of this size: treat the range as rough.")
+    if sized:
+        lo, med, hi = sized
+        print(f"80% range: {lo}-{hi} work hours ({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
+        print(f"Without a size: {base[0]}-{base[2]} h.")
+        if n < 20:
+            print("Fewer than 20 tasks of this size: treat the range as rough.")
+    else:
+        lo, med, hi = base
+        print(f"Not enough history for size {a.size}. Without a size: {lo}-{hi} work hours "
+              f"({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
     if a.paths:
         print_needs(a.paths, cfg)
     if not a.log:
         return
     rec = dict(id=uuid.uuid4().hex[:8], at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=issue, text=a.text, pr=None,
-               range_h=[lo, med, hi], baseline_h=base, n=n, off=a.off or [], actual=None)
+               range_h=[lo, med, hi], baseline_h=base, n=n, sized=bool(sized), off=a.off or [], actual=None)
     with open_out(a.log_file, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(f"Logged as {rec['id']}." + ("" if a.issue else f" No issue given: run `cc-estimate attach {rec['id']} --pr <N>` once the PR exists."))
