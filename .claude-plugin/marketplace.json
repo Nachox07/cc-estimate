@@ -1,6 +1,11 @@
 {
   "name": "cc-estimate",
-  "owner": {"name": "Nachox07"},
+  "owner": {
+    "name": "Nachox07"
+  },
+  "metadata": {
+    "description": "Planning and estimation for AI-assisted teams, from your own delivery history."
+  },
   "plugins": [
     {
       "name": "cc-estimate",

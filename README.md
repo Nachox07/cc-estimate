@@ -33,11 +33,13 @@ flowchart LR
   T --> E[estimate] -->|--log| L[(estimates.jsonl)] --> S[score]
 ```
 
-**1. A task is a unit of delivered work.** That's the commits sharing a tracker key (`ABC-123`), or
+**1. A task is a unit of delivered work.** That's the commits sharing a tracker key (`ABC-123` or `#123`), or
 the pull requests closing the same issue.
 
 **2. Its cycle time counts working hours only.** The clock runs from the first commit to the last
-merge. Only Mon–Fri, 09:00–18:00 in your timezone counts. Then three things come out:
+merge. With the git-only source the end is the merge commit that landed the work when the history has
+one. In a squash-merged history it is the last commit carrying the key: a commit span, which leaves out
+review and merge waiting. Only Mon–Fri, 09:00–18:00 in your timezone counts. Then three things come out:
 - **absence**: days off, from config or per estimate;
 - **non-working states**: periods a work item was blocked, on hold or waiting in a queue, taken
   from issue labels or from your tracker's status history;
@@ -58,6 +60,10 @@ will trigger. This is context; it doesn't change the number.
 - Scoring uses the most recent 20% of tasks, which are never used for tuning.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
   finished.
+
+The `size` rows assume you name the final size before you start, so they are a best case. Logged
+estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40
+finished tasks; below that it says so.
 
 Every method competes against plain baselines (repo median, trailing 30 days, same author) on
 three numbers:
@@ -104,7 +110,15 @@ cc-estimate estimate --size M --issue ABC-123 --paths src/api/ --log --config cc
 cc-estimate score    --config cc-estimate.json
 ```
 
-To use it from Claude Code, copy `skill/` into your skills folder.
+**In Claude Code:**
+
+```
+/plugin install cc-estimate --marketplace Nachox07/cc-estimate
+```
+
+On Claude Code versions without `--marketplace`, run `/plugin marketplace add Nachox07/cc-estimate`,
+then `/plugin install cc-estimate@cc-estimate`. The plugin's skill calls the `cc-estimate` command,
+so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimate`).
 
 ## Adapting it to your stack
 
@@ -115,7 +129,7 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 | `id` | task key (`ABC-123`, issue number) |
 | `title`, `labels` | as known when the task started |
 | `author` | who delivered it; used only for that person's own estimates |
-| `start`, `end` | ISO-8601: first commit, last merge |
+| `start`, `end` | ISO-8601: first commit; last merge (or last commit, see above) |
 | `lines` | changed lines, tests and docs included |
 | `excluded` | `{"blocked": [[start, end], …], …}`: non-working periods |
 
@@ -126,18 +140,20 @@ filed under, and link the commits to it.
 
 Repo-specific behaviour lives in `cc-estimate.json`: bots to ignore, timezone, absence, labels
 that mean "not working", and the `classifier` hooks for approval and test-suite rules. See
-`config.example.json`.
+`config.example.json`. `default_branch` (default `main`) names the branch work lands on.
+`git.key_regex` takes one pattern or a list tried in order.
 
 ## Privacy
 
-Delivery history contains your colleagues' activity. `data/`, the cache and `cc-estimate.json`
-are git-ignored. No command prints another person's numbers: per-person data is used only to log
-and score your own estimates, and the test suite enforces this. Cycle time mostly measures
-waiting, not effort, so don't use it to compare people.
+Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
+`data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
+or numbers: per-person data is used only to log and score your own estimates. The test suite runs
+every offline command on a three-person fixture and fails if another login appears. Cycle time
+mostly measures waiting, not effort, so don't use it to compare people.
 
 ## Status and roadmap
 
-v0.1. Planned work:
+v0.1.1. Planned work:
 - Jira and Linear API sources.
 - Splitting cycle time into active work and waiting.
 - Similar-task retrieval to show the closest finished tasks beside the range.
