@@ -6,3 +6,4 @@ cc-estimate.json
 __pycache__/
 *.egg-info/
 .venv/
+build/

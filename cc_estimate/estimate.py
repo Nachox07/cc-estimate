@@ -19,11 +19,13 @@ from . import backtest as bt
 from . import classify as cl
 from . import gitsource as gs
 from .links import LABEL_EVENTS, blocked_spans
+from .files import open_out
 
 LEVEL = 0.8
 LO_P, HI_P = (1 - LEVEL) / 2, 1 - (1 - LEVEL) / 2
 HOURS_PER_DAY = bt.DAY1 - bt.DAY0
 CENSOR_DAYS = 21
+MIN_N = 5
 
 
 def gh(*args):
@@ -40,15 +42,34 @@ def me(cfg=None):
     return gh("api", "user", "--jq", ".login").strip()
 
 
+def task_key(issue, source):
+    """The key a logged estimate is scored by. GitHub scores issue numbers; git scores any key,
+    reading a bare number as `#N`."""
+    s = str(issue).strip()
+    if source == "git":
+        return f"#{s}" if s.isdigit() else s
+    n = s.lstrip("#")
+    if not n.isdigit():
+        sys.exit(f"--issue {s}: the GitHub source scores issue numbers. "
+                 "Set \"source\": \"git\" in the config to use tracker keys.")
+    return int(n)
+
+
 def ranges(tasks_path, tz, size, cfg):
+    p = Path(tasks_path)
+    if not p.exists():
+        sys.exit(f"no history at {p}: build it first (README, Quick start).")
     rows = bt.load(tasks_path, tz, cfg)
-    cut = max(r["end"] for r in rows) - timedelta(days=CENSOR_DAYS)
-    rows = [r for r in rows if r["start"] <= cut]  # recent starts: only the fast ones have finished
-    same = [r["y"] for r in rows if r["size"] == size]
-    allr = [r["y"] for r in rows]
+    if not rows:
+        sys.exit(f"{p} has no tasks.")
     newest = max(r["end"] for r in rows)
+    cut = newest - timedelta(days=CENSOR_DAYS)
+    rows = [r for r in rows if r["start"] <= cut]  # recent starts: only the fast ones have finished
+    if len(rows) < MIN_N:
+        sys.exit(f"Only {len(rows)} finished tasks started before {cut:%Y-%m-%d}: not enough history yet.")
+    same = [r["y"] for r in rows if r["size"] == size]
     rng = lambda ys: [round(bt.q(ys, LO_P), 1), round(bt.q(ys, 0.5), 1), round(bt.q(ys, HI_P), 1)]
-    return rng(same), len(same), rng(allr), newest
+    return (rng(same) if len(same) >= MIN_N else None), len(same), rng([r["y"] for r in rows]), newest
 
 
 def days(h):
@@ -72,21 +93,28 @@ def print_needs(paths, cfg):
 
 
 def cmd_estimate(a, cfg):
+    issue = task_key(a.issue, cfg.get("source")) if a.issue else None
     tz = ZoneInfo(cfg.get("timezone", "UTC"))
-    (lo, med, hi), n, base, newest = ranges(a.tasks, tz, a.size, cfg)
+    sized, n, base, newest = ranges(a.tasks, tz, a.size, cfg)
     print(f"Size {a.size}: {n} finished tasks in history (data up to {newest:%Y-%m-%d}).")
-    print(f"80% range: {lo}-{hi} work hours ({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
-    print(f"Without a size: {base[0]}-{base[2]} h.")
-    if n < 20:
-        print("Fewer than 20 tasks of this size: treat the range as rough.")
+    if sized:
+        lo, med, hi = sized
+        print(f"80% range: {lo}-{hi} work hours ({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
+        print(f"Without a size: {base[0]}-{base[2]} h.")
+        if n < 20:
+            print("Fewer than 20 tasks of this size: treat the range as rough.")
+    else:
+        lo, med, hi = base
+        print(f"Not enough history for size {a.size}. Without a size: {lo}-{hi} work hours "
+              f"({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
     if a.paths:
         print_needs(a.paths, cfg)
     if not a.log:
         return
     rec = dict(id=uuid.uuid4().hex[:8], at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-               author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=a.issue, text=a.text, pr=None,
-               range_h=[lo, med, hi], baseline_h=base, n=n, off=a.off or [], actual=None)
-    with open(a.log_file, "a") as f:
+               author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=issue, text=a.text, pr=None,
+               range_h=[lo, med, hi], baseline_h=base, n=n, sized=bool(sized), off=a.off or [], actual=None)
+    with open_out(a.log_file, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(f"Logged as {rec['id']}." + ("" if a.issue else f" No issue given: run `cc-estimate attach {rec['id']} --pr <N>` once the PR exists."))
 
@@ -127,9 +155,11 @@ def actual_for_git(rec, tz, cfg):
     """Git-only source: the task is the commits carrying its key. It counts as finished once the
     key has had no commit for `quiet_days` (default 5) days."""
     g = cfg.get("git", {})
-    rows, _ = gs.build(gs.commits(g.get("repo_dir", "."), g.get("branch", "HEAD"), "365 days ago"),
-                       re.compile(g.get("key_regex", gs.DEFAULT_KEY)))
-    row = next((r for r in rows if r["id"] == str(rec.get("issue"))), None)
+    repo_dir, branch = g.get("repo_dir", "."), g.get("branch", "HEAD")
+    rows, _ = gs.build(gs.commits(repo_dir, branch, "365 days ago"), gs.key_patterns(g.get("key_regex")),
+                       merged=gs.merges(repo_dir, branch, "365 days ago"))
+    key = task_key(rec.get("issue"), "git")
+    row = next((r for r in rows if r["id"] == key), None)
     if not row:
         return None
     end = bt.parse(row["end"])
@@ -138,12 +168,13 @@ def actual_for_git(rec, tz, cfg):
     start = bt.parse(row["start"])
     off = bt.off_dates(cfg, rec["author"]) | bt.expand_dates(rec.get("off", []))
     return dict(hours=round(bt.biz_hours(start, end, tz, off), 1), hours_raw=round(bt.biz_hours(start, end, tz), 1),
-                start=start.isoformat(), end=end.isoformat(), commits=row["commits"])
+                start=start.isoformat(), end=end.isoformat(), commits=row["commits"],
+                end_kind=row["end_kind"])
 
 
 def actual_for(rec, tz, cfg):
     """Work hours from the first commit or PR open (whichever is earlier) to the last merge,
-    over the main-branch PRs that delivered the task, minus absence days and blocked spans.
+    over the default-branch PRs that delivered the task, minus absence days and blocked spans.
     None while any is unmerged."""
     if cfg.get("source") == "git":
         return actual_for_git(rec, tz, cfg)
@@ -152,12 +183,12 @@ def actual_for(rec, tz, cfg):
     if rec.get("pr"):
         prs = [gql(PR_Q, o=owner, r=name, n=rec["pr"])["pullRequest"]]
     elif rec.get("issue"):
-        issue = gql(ISSUE_Q, o=owner, r=name, n=int(str(rec["issue"]).lstrip("#")))["issue"]
+        issue = gql(ISSUE_Q, o=owner, r=name, n=task_key(rec["issue"], "github"))["issue"]
         prs = issue["closedByPullRequestsReferences"]["nodes"]
         blocked += blocked_spans(issue.get("labelEvents"), issue.get("closedAt"))
     else:
         return None
-    prs = [p for p in prs if p["baseRefName"] == "main"]
+    prs = [p for p in prs if p["baseRefName"] == cfg.get("default_branch", "main")]
     if not prs or any(not p["mergedAt"] for p in prs):
         return None
     starts = [p["createdAt"] for p in prs] + [c["commit"]["authoredDate"] for p in prs for c in p["commits"]["nodes"]]

@@ -16,6 +16,7 @@ import argparse, json, re, subprocess, sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from .files import open_out
 
 SUBJECT_PR = re.compile(r"\(#(\d+)\)\s*$")
 
@@ -97,7 +98,7 @@ def main(argv=None):
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         rows = list(ex.map(one, tasks))
-    with open(a.out, "w") as f:
+    with open_out(a.out) as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
     print(f"{len(rows)} tasks; paths found for {sum(r['found'] for r in rows)}; "

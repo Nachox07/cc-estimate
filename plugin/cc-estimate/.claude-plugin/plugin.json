@@ -1,0 +1,8 @@
+{
+  "name": "cc-estimate",
+  "version": "0.1.1",
+  "description": "Estimate how long a task will take from your team's own delivery history, and score the estimates.",
+  "author": {"name": "Nachox07"},
+  "homepage": "https://github.com/Nachox07/cc-estimate",
+  "license": "MIT"
+}

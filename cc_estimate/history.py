@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from .files import open_out
 
 HERE = Path(__file__).resolve().parent
 
@@ -572,11 +573,9 @@ def cmd_fetch(a):
             tiers = list(ex.map(lambda rp: risk_tier(rp[1], cfg), recs))
         for (rec, _), t in zip(recs, tiers):
             rec["risk_tier"] = t
-    out = open(a.out, "w") if a.out else sys.stdout
-    for rec, _ in sorted(recs, key=lambda x: x[0]["merged_at"]):
-        out.write(json.dumps(rec) + "\n")
-    if a.out:
-        out.close()
+    with open_out(a.out) as out:
+        for rec, _ in sorted(recs, key=lambda x: x[0]["merged_at"]):
+            out.write(json.dumps(rec) + "\n")
     meta = {"repo": a.repo, "since": str(since), "until": str(until), "prs": len(recs), "shortfalls": shortfalls,
             "gh_calls": STATS["calls"], "cache_hits": STATS["cache_hits"], "graphql_points": STATS["points"]}
     print(json.dumps(meta), file=sys.stderr)
@@ -719,10 +718,10 @@ def cmd_summary(a):
         L.append(f"| {lab} | {ph('coding')} | {ph('wait_first_human_review')} | {ph('first_human_review_to_merge')} | "
                  f"{sum(1 for r in rs if not r['review']['first_human_review_at'])} |")
     L.append("\n## Ten largest PRs by changed code lines\n")
-    L.append("| PR | Author | Code lines | Tests | Docs | Files | Active days | Weekdays | Rounds |\n|---|---|---|---|---|---|---|---|---|")
+    L.append("| PR | Code lines | Tests | Docs | Files | Active days | Weekdays | Rounds |\n|---|---|---|---|---|---|---|---|")
     for r in sorted(recs_all, key=lambda r: -r["size"]["lines"]["code"])[:10]:
         s = r["size"]
-        L.append(f"| #{r['number']} | {r['author']} | {s['lines']['code']} | {s['lines']['tests']} | {s['lines']['docs']} | "
+        L.append(f"| #{r['number']} | {s['lines']['code']} | {s['lines']['tests']} | {s['lines']['docs']} | "
                  f"{s['changed_files']} | {r['time']['active_days']} | {r['time']['weekdays_span']} | {r['review']['rounds']} |")
     if a.focus:
         L.append("")
@@ -732,13 +731,15 @@ def cmd_summary(a):
                 L.append(f"## PR #{num}\n\nNot in the data set.")
                 continue
             L.append(f"## PR #{num}: {r['title']}\n")
-            L.append("```json\n" + json.dumps({k: r[k] for k in ("author", "created_at", "merged_at", "first_commit_at",
+            r = {**r, "review": {k: v for k, v in r["review"].items() if k not in ("human_reviewers", "ai_review_bots")}}
+            L.append("```json\n" + json.dumps({k: r[k] for k in ("created_at", "merged_at", "first_commit_at",
                      "last_commit_at", "size", "commits", "commits_by_author", "time", "phases_weekdays", "review", "ai", "ci", "risk_tier")},
                      indent=1) + "\n```")
     if a.notes and Path(a.notes).exists():
         L.append("\n" + Path(a.notes).read_text())
     text = "\n".join(L) + "\n"
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(text)
     else:
         print(text)
@@ -754,7 +755,7 @@ def main(argv=None):
     f.add_argument("--days", type=int, default=120)
     f.add_argument("--since"); f.add_argument("--until")
     f.add_argument("--config")
-    f.add_argument("--out")
+    f.add_argument("--out", required=True)
     f.add_argument("--include", type=int, nargs="*", help="extra PR numbers to fetch even if outside the window")
     f.add_argument("--workers", type=int, default=6)
     c = sp.add_parser("ci")

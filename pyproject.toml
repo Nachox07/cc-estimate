@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cc-estimate"
-version = "0.1.0"
+version = "0.1.1"
 description = "Estimate how long a task will take from your repo's own history, and score the estimates."
 readme = "README.md"
 license = {text = "MIT"}

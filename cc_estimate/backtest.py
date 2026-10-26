@@ -162,6 +162,18 @@ METHODS = {
 FALLBACK = {"profile+size": ["approvals+size", "size"], "approvals+size": ["size"], "e2e+size": ["size"],
             "size+team load": ["size"], "size+group load": ["size"]}
 PACE_PRIOR = 15
+MIN_TASKS = 40   # below this a backtest says nothing useful
+MIN_SCORED = 10  # fewest estimates a table row is printed for
+
+
+def split(n, min_history):
+    """Tuning starts after `min_history` tasks, or half the history if that is less; the last
+    20% of the rest, and at least MIN_SCORED tasks, is the locked slice."""
+    if n < MIN_TASKS:
+        return None
+    first = min(min_history, n // 2)
+    rest = n - first
+    return first, n - max(rest - int(rest * 0.8), MIN_SCORED)
 
 
 def pace(h, t):
@@ -218,19 +230,23 @@ def score(o):
 
 def table(results, keep):
     print(f"  {'method':26} {'n':>5} {'cover':>6} {'width_h':>8} {'medAE_h':>7} {'winkler':>8} {'fallbk':>6}")
+    shown = 0
     for name, o in results.items():
         o = [x for x in o if keep(x["t"])]
-        if len(o) < 20:
+        if len(o) < MIN_SCORED:
             continue
         s = score(o)
+        shown += 1
         print(f"  {name:26} {s['n']:5d} {s['coverage']:6.2f} {s['width']:8.1f} {s['medae']:7.1f} {s['winkler']:8.1f} {s['fallback']:6.2f}")
+    if not shown:
+        print(f"  fewer than {MIN_SCORED} tasks here: nothing to score")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True, help="tasks jsonl from tasks.py")
     ap.add_argument("--tz", help="default: the config's timezone, else UTC")
-    ap.add_argument("--min-history", type=int, default=200)
+    ap.add_argument("--min-history", type=int, default=200, help="tasks before tuning starts; capped at half the history")
     ap.add_argument("--k-min", type=int, default=10)
     ap.add_argument("--level", type=float, default=0.8)
     ap.add_argument("--config")
@@ -241,12 +257,16 @@ def main(argv=None):
     profiles = {p["id"]: p for p in map(json.loads, Path(a.profiles).read_text().splitlines())} if a.profiles else {}
     cfg = json.loads(Path(a.config).read_text()) if a.config else {}
     rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles)
-    data_end = max(r["end"] for r in rows)
-    cut = data_end - timedelta(days=a.censor_days)
-    dropped = sum(r["start"] > cut for r in rows)
-    rows = [r for r in rows if r["start"] <= cut]
-    n, first = len(rows), a.min_history
-    lock = first + int((n - first) * 0.8)
+    data_end = max((r["end"] for r in rows), default=None)
+    cut = data_end - timedelta(days=a.censor_days) if data_end else None
+    dropped = sum(r["start"] > cut for r in rows) if cut else 0
+    rows = [r for r in rows if r["start"] <= cut] if cut else []
+    n = len(rows)
+    s = split(n, a.min_history)
+    if not s:
+        print(f"{n} finished tasks: too few to backtest (needs {MIN_TASKS}).")
+        return
+    first, lock = s
     bucket_load(rows, rows[:lock])
     lo_p, hi_p = (1 - a.level) / 2, 1 - (1 - a.level) / 2
     print(f"dropped {dropped} tasks starting after {cut:%Y-%m-%d} (right-censoring)")
@@ -255,6 +275,9 @@ def main(argv=None):
     print(f"tasks: {n}  tune: [{first},{lock})  locked: [{lock},{n})  level={a.level}  locked from {rows[lock]['start']:%Y-%m-%d}")
     for size in ("XS", "S", "M", "L", "XL"):
         ys = [r["y"] for r in rows if r["size"] == size]
+        if not ys:
+            print(f"  {size:2} n=   0")
+            continue
         print(f"  {size:2} n={len(ys):4d}  business hours p10={q(ys,.1):6.1f} p50={q(ys,.5):6.1f} p90={q(ys,.9):6.1f}")
     strata = {"all tasks": lambda t: True, "planned M+": lambda t: t["size"] in ("M", "L", "XL"),
               "planned L+": lambda t: t["size"] in ("L", "XL")}

@@ -1,0 +1,16 @@
+{
+  "name": "cc-estimate",
+  "owner": {
+    "name": "Nachox07"
+  },
+  "metadata": {
+    "description": "Planning and estimation for AI-assisted teams, from your own delivery history."
+  },
+  "plugins": [
+    {
+      "name": "cc-estimate",
+      "source": "./plugin/cc-estimate",
+      "description": "Estimate how long a task will take from your team's own delivery history, and score the estimates."
+    }
+  ]
+}

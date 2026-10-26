@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import date, timedelta
 
 from . import history as h
+from .files import open_out
 
 LABEL_EVENTS = """labelEvents: timelineItems(first: 50, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) { nodes {
   __typename ... on LabeledEvent { createdAt label { name } } ... on UnlabeledEvent { createdAt label { name } } } }"""
@@ -73,7 +74,7 @@ def blocked_spans(events, close_at):
     return label_spans(events, close_at, set(DEFAULT_EXCLUDED["blocked"]))
 
 
-def record(n, groups):
+def record(n, groups, branch="main"):
     body = n.get("body") or ""
     closing = []
     for i in (n.get("closingIssuesReferences") or {}).get("nodes") or []:
@@ -87,7 +88,7 @@ def record(n, groups):
     return dict(number=n["number"], base=n["baseRefName"], head=n["headRefName"],
                 excluded=excluded_spans(n.get("labelEvents"), n["mergedAt"], groups),
                 closing=closing, body_refs=sorted({int(x) for x in REF.findall(body)}),
-                cherry_pick_of=int(picked[0]) if picked else (int(m.group(1)) if m and n["baseRefName"] != "main" else None))
+                cherry_pick_of=int(picked[0]) if picked else (int(m.group(1)) if m and n["baseRefName"] != branch else None))
 
 
 def main(argv=None):
@@ -97,7 +98,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--config")
     a = ap.parse_args(argv)
-    groups = (json.loads(Path(a.config).read_text()).get("excluded_labels") if a.config else None) or DEFAULT_EXCLUDED
+    cfg = json.loads(Path(a.config).read_text()) if a.config else {}
+    groups = cfg.get("excluded_labels") or DEFAULT_EXCLUDED
     since, until = date.fromisoformat(a.since), date.fromisoformat(a.until)
     rows, d = [], since
     while d <= until:  # month-sized windows keep each search under the 1000-result cap
@@ -106,8 +108,8 @@ def main(argv=None):
         d = e + timedelta(days=1)
     seen = {}
     for n in rows:
-        seen[n["number"]] = record(n, groups)
-    with open(a.out, "w") as f:
+        seen[n["number"]] = record(n, groups, cfg.get("default_branch", "main"))
+    with open_out(a.out) as f:
         for r in sorted(seen.values(), key=lambda r: r["number"]):
             f.write(json.dumps(r) + "\n")
     print(f"wrote {len(seen)} rows to {a.out}; gh calls {h.STATS['calls']} cache {h.STATS['cache_hits']} points {h.STATS['points']}",
