@@ -95,8 +95,9 @@ window in `drift`, and the product-code bucket in `test-heavy`.
 | size-matters | duration grows with size | size rows: coverage 70–90% and a Winkler score at least 15% below the baseline's |
 | null | size has no effect | size rows: coverage 70–90%, Winkler score within 5% of the baseline's; `backtest` does not recommend size |
 | drift | tasks get 2× faster halfway | `backtest` picks the 90-day window, its Winkler score at least 15% below "all", and `estimate` uses it |
+| steady | no change over time, wide spread | `backtest` picks "all" or the longest window, and `estimate` uses it |
 | test-heavy | a third of tasks carry 5× their code in tests | each lands in the bucket of its product-code size and is flagged test-heavy; no other task is flagged |
-| break-point | width doubles above L; 60 tasks per bucket | the advisor names L as the break and splits no task at or below it; the slices together cover the task's areas, each is below the break, and the replay of those slices finishes sooner in total than the single task |
+| break-point | width doubles above L; 60 tasks per bucket | the advisor names L as the break and splits no task at or below it; the slices together cover every planned file, each is below the break, and the replay of those slices finishes sooner in total than the single task |
 | no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
 | merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |
 | thin | 30 tasks, 27 of them S and 3 of them L | `backtest` refuses; `estimate --size L` says the size has too little history and gives the size-blind range |
