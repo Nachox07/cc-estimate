@@ -62,15 +62,17 @@ class LabelSpans(unittest.TestCase):
         self.assertEqual(links.label_spans(events, "2026-10-06T10:00:00Z", {"blocked"}), [])
 
 
-def synthetic(n=400, seed=7):
-    """PR records + links for a fake repo: size drives duration, with noise."""
+def synthetic(n=400, seed=7, size_matters=True):
+    """PR records + links for a fake repo: size drives duration, with noise. With `size_matters`
+    off, duration comes from an independent draw, so size carries no signal."""
     rnd = random.Random(seed)
     prs, lks = [], []
     start = datetime(2026, 6, 1, 9, tzinfo=UTC)
     for i in range(1, n + 1):
         lines = int(rnd.choice([20, 120, 600, 2500, 8000]) * rnd.uniform(0.6, 1.4))
         created = start + timedelta(hours=i * 7)
-        merged = created + timedelta(hours=lines / 40 * rnd.uniform(0.5, 2.0) + rnd.uniform(0, 30))
+        drives = lines if size_matters else int(rnd.choice([20, 120, 600, 2500, 8000]) * rnd.uniform(0.6, 1.4))
+        merged = created + timedelta(hours=drives / 40 * rnd.uniform(0.5, 2.0) + rnd.uniform(0, 30))
         author = LOGINS[i % 3] if i % 50 else "release-bot[bot]"
         base = "main" if i % 40 else "release/1.0"
         prs.append(dict(number=i, title=rnd.choice(["feat: x", "fix: y", "chore: z"]), author=author, labels=[],
@@ -135,6 +137,16 @@ class Tasks(unittest.TestCase):
             d = write(tmp, prs, lks, {})
             rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
         self.assertEqual([r["prs"] for r in rows], [[1, 2]])
+
+    def test_a_task_ends_when_its_last_pr_merges(self):
+        prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at=m, first_commit_at=None, size={"lines": {"code": 10, "tests": 0, "docs": 0}}, review={"rounds": 0})
+               for n, m in [(1, "2026-10-05T12:00:00Z"), (2, "2026-10-07T15:00:00Z")]]
+        lks = [dict(number=n, base="main", closing=[{"number": 50, "excluded": {}}], excluded={}) for n in (1, 2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, prs, lks, {})
+            row = json.loads((d / "tasks.jsonl").read_text())
+        self.assertEqual(row["end"], "2026-10-07T15:00:00Z")
 
     def test_grouping_keeps_prs_into_the_configured_default_branch(self):
         prs, lks = synthetic(60)
@@ -211,7 +223,94 @@ class Backtest(unittest.TestCase):
         idx = list(range(200, len(self.rows)))
         size = bt.score(bt.run(self.rows, idx, "size", 10, 0.1, 0.9))
         repo = bt.score(bt.run(self.rows, idx, "baseline: repo", 10, 0.1, 0.9))
-        self.assertLess(size["winkler"], repo["winkler"])
+        self.assertLess(size["winkler"], 0.85 * repo["winkler"])
+
+    def scores(self, seed, size_matters):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write(tmp, *synthetic(seed=seed, size_matters=size_matters), {"timezone": "Europe/Madrid"})
+            rows = bt.load(str(d / "tasks.jsonl"), MAD, {})
+        idx = list(range(200, len(rows)))
+        return (bt.score(bt.run(rows, idx, "size", 10, 0.1, 0.9)),
+                bt.score(bt.run(rows, idx, "baseline: repo", 10, 0.1, 0.9)))
+
+    def test_size_wins_clearly_and_covers_about_80_percent_across_seeds(self):
+        for seed in range(7, 12):
+            with self.subTest(seed=seed):
+                size, repo = self.scores(seed, size_matters=True)
+                self.assertLess(size["winkler"], 0.85 * repo["winkler"])
+                self.assertTrue(0.75 <= size["coverage"] <= 0.95, size["coverage"])
+
+    def test_size_does_not_win_when_size_has_no_effect(self):
+        for seed in range(7, 12):
+            with self.subTest(seed=seed):
+                size, repo = self.scores(seed, size_matters=False)
+                self.assertGreater(size["winkler"], 0.95 * repo["winkler"])
+
+
+def scored_row(start, end, y, size="S", author="alice"):
+    return dict(id=start, start=start, end=end, y=y, author=author, size=size, kind="feat", epic=None,
+                approvals=None, e2e=None, spread=None, approval_set=frozenset())
+
+
+class ScoringMath(unittest.TestCase):
+    """The instruments themselves, checked against numbers worked out by hand."""
+    T0 = datetime(2026, 6, 1, tzinfo=UTC)
+
+    def history(self, ys, size="S"):
+        return [scored_row(self.T0 + timedelta(days=i), self.T0 + timedelta(days=i, hours=1), y, size)
+                for i, y in enumerate(ys)]
+
+    def test_coverage_width_and_winkler_match_a_hand_calculation(self):
+        h = self.history(range(1, 11))
+        late = scored_row(self.T0 + timedelta(days=30), self.T0 + timedelta(days=31), 20)
+        [o] = bt.run(h + [late], [10], "baseline: repo", 5, 0.1, 0.9)
+        # 10th and 90th percentiles of 1..10 are 1.9 and 9.1; the actual (20) misses by 10.9;
+        # an 80% interval's miss penalty is 2 / 0.2 = 10 per hour missed.
+        self.assertFalse(o["inside"])
+        self.assertAlmostEqual(o["width"], 7.2)
+        self.assertAlmostEqual(o["winkler"], 7.2 + 10 * 10.9)
+        inside = scored_row(self.T0 + timedelta(days=30), self.T0 + timedelta(days=31), 5)
+        [o] = bt.run(h + [inside], [10], "baseline: repo", 5, 0.1, 0.9)
+        self.assertTrue(o["inside"])
+        self.assertAlmostEqual(o["winkler"], 7.2)
+
+    def test_a_task_still_open_at_the_start_is_not_history(self):
+        done = self.history([1] * 10)
+        still_open = [scored_row(self.T0 + timedelta(days=20, hours=i), self.T0 + timedelta(days=90), 500)
+                      for i in range(10)]
+        t = scored_row(self.T0 + timedelta(days=21), self.T0 + timedelta(days=22), 1)
+        rows = done + still_open + [t]
+        [o] = bt.run(rows, [len(rows) - 1], "baseline: repo", 5, 0.1, 0.9)
+        self.assertEqual(o["width"], 0)
+
+    def test_trailing_baseline_uses_only_the_last_thirty_days(self):
+        old = self.history([100] * 10)
+        recent = [scored_row(self.T0 + timedelta(days=60 + i), self.T0 + timedelta(days=60 + i, hours=1), 2)
+                  for i in range(10)]
+        t = scored_row(self.T0 + timedelta(days=75), self.T0 + timedelta(days=76), 2)
+        self.assertEqual(set(bt.trailing(old + recent, t)), {2})
+
+    def test_size_buckets_split_at_50_300_1500_and_5000_lines(self):
+        self.assertEqual([bt.bucket(n) for n in (0, 49, 50, 299, 300, 1499, 1500, 4999, 5000)],
+                         ["XS", "XS", "S", "S", "M", "M", "L", "L", "XL"])
+
+    def test_too_few_matches_falls_back_and_says_so(self):
+        h = self.history([1] * 20, size="S")
+        t = scored_row(self.T0 + timedelta(days=30), self.T0 + timedelta(days=31), 1, size="XL")
+        *_, fell = bt.estimate(h, t, "size", 10, 0.1, 0.9)
+        self.assertTrue(fell)
+        *_, fell = bt.estimate(h, {**t, "size": "S"}, "size", 10, 0.1, 0.9)
+        self.assertFalse(fell)
+
+    def test_pace_moves_little_on_a_few_tasks_and_more_on_many(self):
+        others = [scored_row(self.T0 + timedelta(hours=i), self.T0 + timedelta(hours=i, minutes=30), 4, author="bob")
+                  for i in range(60)]
+        mine = lambda n: [scored_row(self.T0 + timedelta(days=5, hours=i), self.T0 + timedelta(days=5, hours=i, minutes=30),
+                                     8, author="alice") for i in range(n)]
+        t = scored_row(self.T0 + timedelta(days=9), self.T0 + timedelta(days=10), 1)
+        few, many = bt.pace(others + mine(2), t), bt.pace(others + mine(30), t)
+        self.assertLess(few, 1.2)   # two slow tasks barely move it off 1.0
+        self.assertGreater(many, 1.4)
 
 
 class Privacy(unittest.TestCase):
@@ -401,6 +500,15 @@ class ThinHistory(unittest.TestCase):
         self.assertIn("Not enough history for size XL", out)
         self.assertIn("Without a size:", out)
 
+    def test_the_range_is_the_10th_to_90th_percentile(self):
+        t0 = datetime(2026, 1, 5, tzinfo=UTC)
+        rows = [scored_row(t0, t0 + timedelta(days=1), y) for y in range(81)]
+        newest = [scored_row(t0 + timedelta(days=200), t0 + timedelta(days=200), 0)]  # moves the censor cut-off
+        with mock.patch.object(Path, "exists", return_value=True), \
+                mock.patch.object(estimate.bt, "load", return_value=rows + newest):
+            sized, n, base, _ = estimate.ranges("t.jsonl", UTC, "S", {})
+        self.assertEqual(sized, [8.0, 40.0, 72.0])
+
     def test_missing_history_file_names_the_file(self):
         with self.assertRaises(SystemExit) as e:
             self.run_estimate(None, "--size", "M")
@@ -449,6 +557,12 @@ class SmallHistory(unittest.TestCase):
         out = self.run_backtest(task_rows(71))  # the last 21 days are censored, leaving 50
         locked = out.split("== LOCKED · all tasks ==")[1].split("==")[0]
         self.assertIn("baseline: repo", locked)
+
+    def test_methods_needing_classify_output_are_left_out_without_it(self):
+        out = self.run_backtest(task_rows(80))
+        self.assertNotIn("profile", out)
+        self.assertNotIn("approvals+size", out)
+        self.assertIn("size+team load", out)
 
     def test_too_few_tasks_says_so(self):
         self.assertIn("too few to backtest", self.run_backtest(task_rows(50)))

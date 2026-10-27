@@ -161,6 +161,7 @@ METHODS = {
 # On too few matches, fall back down this chain before the trailing-30-day baseline.
 FALLBACK = {"profile+size": ["approvals+size", "size"], "approvals+size": ["size"], "e2e+size": ["size"],
             "size+team load": ["size"], "size+group load": ["size"]}
+NEEDS_PROFILES = {"profile", "profile+size", "approvals+size", "e2e+size", "size+group load"}
 PACE_PRIOR = 15
 MIN_TASKS = 40   # below this a backtest says nothing useful
 MIN_SCORED = 10  # fewest estimates a table row is printed for
@@ -283,7 +284,8 @@ def main(argv=None):
     strata = {"all tasks": lambda t: True, "planned M+": lambda t: t["size"] in ("M", "L", "XL"),
               "planned L+": lambda t: t["size"] in ("L", "XL")}
     for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, n))):
-        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p) for name in METHODS}
+        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p) for name in METHODS
+                   if profiles or name not in NEEDS_PROFILES}  # without classify output they repeat other rows
         for sname, keep in strata.items():
             print(f"\n== {label} · {sname} ==")
             table(results, keep)
