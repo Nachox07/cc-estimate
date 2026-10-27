@@ -94,13 +94,13 @@ window in `drift`, and the product-code bucket in `test-heavy`.
 |---|---|---|
 | size-matters | duration grows with size | size rows: coverage 70–90% and a Winkler score at least 15% below the baseline's |
 | null | size has no effect | size rows: coverage 70–90%, Winkler score within 5% of the baseline's; `backtest` does not recommend size |
-| drift | tasks get 2× faster halfway | `backtest` picks the 90-day window, its Winkler score at least 15% below "all", and `estimate` uses it |
-| steady | no change over time, wide spread | `backtest` picks "all" or the longest window, and `estimate` uses it |
+| drift | tasks get 2× faster 100 days before the end | `backtest` picks 60 or 90 days, scoring at least 15% better than "all"; `estimate` uses it and covers 70–90% of fresh tasks |
+| steady | no change over time, wide spread | `backtest` picks "all" or the longest window; `estimate` uses it and covers 70–90% of fresh tasks |
 | test-heavy | a third of tasks are M by product code and carry 5× that in tests, enough to make them XL if tests counted | each lands in the bucket of its product-code size and is flagged test-heavy; no other task is flagged |
-| break-point | width doubles above L; 60 tasks per bucket | the advisor names L as the break and splits no task at or below it; the slices together cover every planned file, each is below the break, and the replay of those slices finishes sooner in total than the single task |
+| break-point | width doubles from L to XL; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break, and the replay of those slices finishes sooner in total than the single task |
 | no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
-| slow-splits | a break above L, but past split tasks took longer in total | the advisor gives no advice |
-| thin-advisor | a break above L, 15 tasks above it | the advisor gives no advice and says history is too thin |
+| slow-splits | a break at XL, but past split tasks took longer in total | the advisor gives no advice |
+| thin-advisor | a break at XL, 15 XL tasks | the advisor gives no advice and says history is too thin |
 | merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |
 | thin | 30 tasks, 27 of them S and 3 of them L | `backtest` refuses; `estimate --size L` says the size has too little history and gives the size-blind range |
 
