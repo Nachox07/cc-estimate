@@ -26,5 +26,7 @@ jobs:
         working-directory: /tmp
         run: |
           /tmp/venv/bin/cc-estimate --help
-          /tmp/venv/bin/cc-estimate git-tasks --repo-dir "$GITHUB_WORKSPACE" --since "10 years ago" --out /tmp/new/tasks.jsonl
+          mkdir -p /tmp/new && cd /tmp/new
+          /tmp/venv/bin/cc-estimate init
+          /tmp/venv/bin/cc-estimate git-tasks --repo-dir "$GITHUB_WORKSPACE" --since "10 years ago" --config cc-estimate.json --out /tmp/new/tasks.jsonl
           test -f /tmp/new/tasks.jsonl

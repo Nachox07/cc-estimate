@@ -58,7 +58,8 @@ will trigger. This is context; it doesn't change the number.
 
 **5. It proves itself before you rely on it.** `backtest` replays your history:
 - Each task is estimated using only tasks that had already finished when it started.
-- Scoring uses the most recent 20% of tasks, which are never used for tuning.
+- The oldest tasks only serve as history. Of the rest, the most recent 20% (at least 10) are
+  locked for scoring and never used for tuning.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
   finished.
 
@@ -73,7 +74,8 @@ three numbers:
 - **[Winkler score](https://otexts.com/fpp3/toolbox.html#sec-distaccuracy)**: width plus a penalty for misses.
   Lower is better.
 
-Keep a method only if it wins on your repo.
+`estimate` always prints the size-blind range next to the size range. Trust the size range only
+where the backtest shows it winning on your repo.
 
 **6. It keeps score.** Every logged estimate is later compared with the real cycle time. `score`
 reports your coverage, and whether your size call beat a size-blind interval.
@@ -85,7 +87,7 @@ Requires Python 3.10+. No dependencies. The GitHub source also needs an authenti
 
 ```bash
 pip install git+https://github.com/Nachox07/cc-estimate
-cp config.example.json cc-estimate.json     # set repo, source, timezone
+cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone
 ```
 
 **From git only** (Jira, Linear or any key in commit messages; set `"source": "git"`):
@@ -97,7 +99,7 @@ cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" -
 **From GitHub** (pull requests and the issues they close):
 
 ```bash
-cc-estimate fetch --repo org/repo --days 180 --config cc-estimate.json --out data/repo.jsonl
+cc-estimate fetch --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.jsonl
 cc-estimate links --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.links.jsonl
 cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
@@ -107,8 +109,8 @@ cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config c
 ```bash
 cc-estimate spans    --tasks data/repo.tasks.jsonl --csv blocked.csv --out data/repo.tasks.jsonl   # optional
 cc-estimate backtest --in data/repo.tasks.jsonl --config cc-estimate.json
-cc-estimate estimate --size M --issue ABC-123 --paths src/api/ --log --config cc-estimate.json
-cc-estimate score    --config cc-estimate.json
+cc-estimate estimate --size M --issue 123 --paths src/api/ --log --config cc-estimate.json --tasks data/repo.tasks.jsonl
+cc-estimate score    --config cc-estimate.json --tasks data/repo.tasks.jsonl
 ```
 
 **In Claude Code:**
@@ -141,7 +143,7 @@ filed under, and link the commits to it.
 
 Repo-specific behaviour lives in `cc-estimate.json`: bots to ignore, timezone, absence, labels
 that mean "not working", and the `classifier` hooks for approval and test-suite rules. See
-`config.example.json`. `default_branch` (default `main`) names the branch work lands on.
+[`config.example.json`](cc_estimate/config.example.json). `default_branch` (default `main`) names the branch work lands on.
 `git.key_regex` takes one pattern or a list tried in order; pass `--config` to `git-tasks` to use it.
 `classifier.default_branch` is different: the git ref the classifier reads paths from, such as
 `origin/main`.
@@ -149,11 +151,16 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 ## Privacy
 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
-`data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
-or numbers: per-person data is used only to log and score your own estimates. The test suite runs
-`tasks`, `spans`, `backtest`, `estimate`, `score`, `summary` and `git-tasks` on a three-person
-fixture and fails if another login appears. `fetch` writes only to a file. Cycle time
-mostly measures waiting, not effort, so don't use it to compare people.
+`data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login,
+a PR title (titles can name people) or the numbers of someone else's PR. `summary` prints totals per size
+bucket and hides the numbers of a bucket with fewer than five PRs or three authors; the size table
+in `backtest` does the same. `ci` adds its results to the history file and prints only a count.
+`fetch` writes only to a file. The test suite runs `tasks`, `spans`, `backtest`, `estimate`,
+`summary` and `git-tasks` on a three-person fixture and fails if another login appears.
+
+What this does not hide: `estimate` and the backtest scores are ranges over whoever did similar
+work. On a small team, a size most often done by one colleague mostly reflects their pace. Cycle
+time mostly measures waiting, not effort, so don't use any of it to compare people.
 
 ## Status and roadmap
 

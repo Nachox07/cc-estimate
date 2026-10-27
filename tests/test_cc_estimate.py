@@ -111,7 +111,7 @@ def history_records(n=60):
     """PR records shaped like `fetch` output, authored by the three fixture logins."""
     out = []
     for i in range(1, n + 1):
-        out.append(dict(number=i, title=f"feat: change {i}", author=LOGINS[i % 3], commits_by_author=1,
+        out.append(dict(number=i, title=f"feat: change {i}, thanks @{LOGINS[(i + 1) % 3]}", author=LOGINS[i % 3], commits_by_author=1,
                         created_at="2026-10-05T09:00:00Z", merged_at="2026-10-06T09:00:00Z",
                         first_commit_at="2026-10-05T08:00:00Z", last_commit_at="2026-10-06T08:00:00Z", commits=2,
                         size={"lines": {"code": 40 * i, "tests": 10, "docs": 0}, "changed_files": 3},
@@ -426,6 +426,19 @@ class SmallHistory(unittest.TestCase):
                 bt.main(["--in", str(Path(tmp) / "t.jsonl")])
             return buf.getvalue()
 
+    def test_a_size_with_too_few_tasks_prints_no_durations(self):
+        rows = task_rows(80)
+        rows[10] = {**rows[10], "lines": 9000}
+        line = next(l for l in self.run_backtest(rows).splitlines() if l.strip().startswith("XL"))
+        self.assertNotIn("p50", line)
+
+    def test_a_size_done_by_one_person_prints_no_durations(self):
+        rows = task_rows(80)
+        for i in range(10, 16):
+            rows[i] = {**rows[i], "lines": 9000, "author": "alice"}
+        line = next(l for l in self.run_backtest(rows).splitlines() if l.strip().startswith("XL"))
+        self.assertNotIn("p50", line)
+
     def test_split_scales_down_and_keeps_a_locked_slice(self):
         self.assertEqual(bt.split(100, 200), (50, 90))
         self.assertEqual(bt.split(1000, 200), (200, 840))
@@ -445,6 +458,61 @@ class SmallHistory(unittest.TestCase):
         self.assertIn("too few to backtest", self.run_backtest(task_rows(10)))
 
 
+class Init(unittest.TestCase):
+    def test_writes_a_starter_config_and_never_overwrites(self):
+        from cc_estimate.__main__ import main as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "cc-estimate.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli(["init", "--out", str(out)])
+            self.assertEqual(json.loads(out.read_text())["default_branch"], "main")
+            out.write_text("{}")
+            with self.assertRaises(SystemExit):
+                cli(["init", "--out", str(out)])
+            self.assertEqual(out.read_text(), "{}")
+
+
+class SummaryBuckets(unittest.TestCase):
+    def test_a_bucket_too_small_to_hide_one_pr_prints_no_numbers(self):
+        from cc_estimate import history
+        recs = history_records()
+        recs[0] = {**recs[0], "size": {**recs[0]["size"], "lines": {"code": 9000, "tests": 0, "docs": 0}},
+                   "time": {"active_days": 17, "weekdays_span": 23}}
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "h.jsonl"
+            f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                history.main(["summary", "--in", str(f)])
+        row = next(l for l in buf.getvalue().splitlines() if l.startswith("| >5000 | 1 "))
+        self.assertNotRegex(row, r"\d+\.\d")
+        recs = [{**r, "author": "alice"} if r["size"]["lines"]["code"] < 300 else r for r in history_records()]
+        f2 = Path(tempfile.mkdtemp()) / "h.jsonl"
+        f2.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            history.main(["summary", "--in", str(f2)])
+        one_author = next(l for l in buf2.getvalue().splitlines() if l.startswith("| <300 |"))
+        self.assertEqual(one_author.replace(" ", ""), "|<300|7|-|-|")
+        phase_row = [l for l in buf.getvalue().splitlines() if l.startswith("| >5000 |")][-1]
+        self.assertEqual(phase_row.replace(" ", ""), "|>5000|-|-|-|-|")
+
+
+class StarterConfig(unittest.TestCase):
+    def test_estimate_with_paths_works_on_the_unedited_starter_config(self):
+        cfg = json.loads((Path(__file__).resolve().parents[1] / "cc_estimate" / "config.example.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "cfg.json").write_text(json.dumps(cfg))
+            write_tasks(d / "t.jsonl", task_rows(80))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                estimate.main(["estimate", "--config", str(d / "cfg.json"), "--tasks", str(d / "t.jsonl"),
+                               "--size", "M", "--paths", "src/api/"])
+            self.assertIn("approvals: not found", buf.getvalue())
+            self.assertIn("test tiers: not found", buf.getvalue())
+
+
 class EveryCommandPrivacy(unittest.TestCase):
     """Every command that runs without network, on a three-person fixture, prints no other login."""
 
@@ -461,7 +529,7 @@ class EveryCommandPrivacy(unittest.TestCase):
                 "spans": ["spans", "--tasks", str(d / "tasks.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "t3.jsonl")],
                 "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg],
                 "estimate": ["estimate", "--size", "M", "--config", cfg],
-                "summary": ["summary", "--in", str(d / "h.jsonl"), "--focus", "3"],
+                "summary": ["summary", "--in", str(d / "h.jsonl")],
                 "git-tasks": ["git-tasks", "--repo-dir", str(Path(__file__).resolve().parents[1]), "--since", "10 years ago",
                               "--out", str(d / "g.jsonl")],
             }
@@ -472,6 +540,8 @@ class EveryCommandPrivacy(unittest.TestCase):
                         cli(args)
                     for login in LOGINS:
                         self.assertNotIn(login, buf.getvalue())
+                    if name == "summary":  # a PR number leads straight to its author
+                        self.assertNotRegex(buf.getvalue(), r"#\d")
 
 
 if __name__ == "__main__":

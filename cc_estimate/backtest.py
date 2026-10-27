@@ -275,8 +275,9 @@ def main(argv=None):
     print(f"tasks: {n}  tune: [{first},{lock})  locked: [{lock},{n})  level={a.level}  locked from {rows[lock]['start']:%Y-%m-%d}")
     for size in ("XS", "S", "M", "L", "XL"):
         ys = [r["y"] for r in rows if r["size"] == size]
-        if not ys:
-            print(f"  {size:2} n=   0")
+        authors = {r["author"] for r in rows if r["size"] == size}
+        if len(ys) < 5 or len(authors) < 3:  # fewer and the durations describe one person's work
+            print(f"  {size:2} n={len(ys):4d}")
             continue
         print(f"  {size:2} n={len(ys):4d}  business hours p10={q(ys,.1):6.1f} p50={q(ys,.5):6.1f} p90={q(ys,.9):6.1f}")
     strata = {"all tasks": lambda t: True, "planned M+": lambda t: t["size"] in ("M", "L", "XL"),

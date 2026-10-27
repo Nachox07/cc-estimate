@@ -16,3 +16,6 @@ cc-estimate = "cc_estimate.__main__:main"
 
 [tool.setuptools]
 packages = ["cc_estimate"]
+
+[tool.setuptools.package-data]
+cc_estimate = ["config.example.json"]
