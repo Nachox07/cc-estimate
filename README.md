@@ -8,6 +8,9 @@ trust it, and scores every estimate you log against what actually happened. It w
 git, GitHub, or any tracker whose keys appear in commit messages (Jira, Linear, and others), and
 ships as a CLI plus a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill.
 
+New here? [How it works](docs/how-it-works.md) walks through each command's output on a sample
+history, and how the tool is tested.
+
 ## Why
 
 When coding agents write much of the code, implementation stops being the bottleneck. Cycle time
@@ -147,6 +150,14 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `git.key_regex` takes one pattern or a list tried in order; pass `--config` to `git-tasks` to use it.
 `classifier.default_branch` is different: the git ref the classifier reads paths from, such as
 `origin/main`.
+
+## Testing
+
+`python3 -m pytest` runs the suite. It covers each rule on small hand-made inputs, checks that no
+estimate can see the future, and runs generated histories where size matters and where it does
+not: size must win clearly in the first and must not win in the second, across five seeds.
+`python3 tests/mutation_probe.py` plants 24 known bugs one at a time and confirms the suite
+catches every one. Details: [How it works](docs/how-it-works.md#how-it-is-tested).
 
 ## Privacy
 
