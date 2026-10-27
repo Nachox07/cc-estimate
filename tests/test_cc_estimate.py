@@ -459,6 +459,22 @@ class Init(unittest.TestCase):
             self.assertEqual(out.read_text(), "{}")
 
 
+class SummaryBuckets(unittest.TestCase):
+    def test_a_bucket_too_small_to_hide_one_pr_prints_no_numbers(self):
+        from cc_estimate import history
+        recs = history_records()
+        recs[0] = {**recs[0], "size": {**recs[0]["size"], "lines": {"code": 9000, "tests": 0, "docs": 0}},
+                   "time": {"active_days": 17, "weekdays_span": 23}}
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "h.jsonl"
+            f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                history.main(["summary", "--in", str(f)])
+        row = next(l for l in buf.getvalue().splitlines() if l.startswith("| >5000 | 1 "))
+        self.assertNotRegex(row, r"\d+\.\d")
+
+
 class StarterConfig(unittest.TestCase):
     def test_estimate_with_paths_works_on_the_unedited_starter_config(self):
         cfg = json.loads((Path(__file__).resolve().parents[1] / "cc_estimate" / "config.example.json").read_text())

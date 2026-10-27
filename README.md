@@ -74,7 +74,8 @@ three numbers:
 - **[Winkler score](https://otexts.com/fpp3/toolbox.html#sec-distaccuracy)**: width plus a penalty for misses.
   Lower is better.
 
-Keep a method only if it wins on your repo.
+`estimate` always prints the size-blind range next to the size range. Trust the size range only
+where the backtest shows it winning on your repo.
 
 **6. It keeps score.** Every logged estimate is later compared with the real cycle time. `score`
 reports your coverage, and whether your size call beat a size-blind interval.
@@ -98,7 +99,7 @@ cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" -
 **From GitHub** (pull requests and the issues they close):
 
 ```bash
-cc-estimate fetch --repo org/repo --days 180 --config cc-estimate.json --out data/repo.jsonl
+cc-estimate fetch --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.jsonl
 cc-estimate links --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.links.jsonl
 cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
@@ -152,7 +153,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
 or numbers, or a PR title (titles can name people). `summary` prints totals per size bucket, never a
-single PR; `ci` adds its results to the history file and prints only a count. Per-person data is used only to log and score
+single PR, and leaves out buckets with fewer than five PRs; `ci` adds its results to the history file and prints only a count. Per-person data is used only to log and score
 your own estimates. The test suite runs
 `tasks`, `spans`, `backtest`, `estimate`, `summary` and `git-tasks` on a three-person
 fixture and fails if another login appears. `fetch` writes only to a file. Cycle time

@@ -677,7 +677,12 @@ def fmt(x):
     return "-" if x is None else (f"{x:.1f}" if isinstance(x, float) else str(x))
 
 
+MIN_CELL = 5  # fewer PRs than this and a bucket's numbers describe one person's work
+
+
 def dist_row(label, rs):
+    if len(rs) < MIN_CELL:
+        return f"| {label} | {len(rs)} | - | - |"
     a = [r["time"]["active_days"] for r in rs]
     w = [r["time"]["weekdays_span"] for r in rs]
     return (f"| {label} | {len(rs)} | {fmt(pct(a,50))} / {fmt(pct(a,75))} / {fmt(pct(a,90))} | "
@@ -716,11 +721,9 @@ def cmd_summary(a):
     L.append("| Bucket | Coding (first commit to ready) | Wait for first human review | First human review to merge | PRs with no human review |\n|---|---|---|---|---|")
     for lo, hi, lab in SIZE_BUCKETS:
         rs = [r for r in recs if lo <= r["size"]["lines"]["code"] < hi]
-        ph = lambda k: fmt(pct([r["phases_weekdays"][k] for r in rs], 50))
+        ph = lambda k: fmt(pct([r["phases_weekdays"][k] for r in rs], 50)) if len(rs) >= MIN_CELL else "-"
         L.append(f"| {lab} | {ph('coding')} | {ph('wait_first_human_review')} | {ph('first_human_review_to_merge')} | "
                  f"{sum(1 for r in rs if not r['review']['first_human_review_at'])} |")
-    if a.notes and Path(a.notes).exists():
-        L.append("\n" + Path(a.notes).read_text())
     text = "\n".join(L) + "\n"
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
@@ -747,7 +750,6 @@ def main(argv=None):
     c.add_argument("--in", dest="inp", required=True)
     s = sp.add_parser("summary")
     s.add_argument("--in", dest="inp", required=True)
-    s.add_argument("--notes", help="markdown file appended verbatim")
     s.add_argument("--out")
     a = p.parse_args(argv)
     CACHE_DIR = Path(a.cache_dir)
