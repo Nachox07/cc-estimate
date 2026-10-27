@@ -85,7 +85,10 @@ Unit tests show the code does what it says. Evals show the numbers are worth tru
 from the same tasks. Durations are drawn from a stated model, so the right answer is known. Fixed
 seeds; each scenario asserts a band, not an exact number. All comparisons are on the same locked
 slice. The scenarios work in pairs, so a method cannot pass by doing nothing: always falling back to
-the baseline passes `null` but fails `size-matters`, and calling every task XS fails `test-heavy`.
+the baseline passes `null` but fails `size-matters`, and calling every task XS fails `test-heavy`. Each
+scenario also runs `estimate` on fresh tasks drawn from the same world and checks that it uses what
+the backtest supports: the size range in `size-matters`, the 90-day window in `drift`, and the
+product-code bucket in `test-heavy`.
 
 | Scenario | World | Must hold |
 |---|---|---|
@@ -93,9 +96,9 @@ the baseline passes `null` but fails `size-matters`, and calling every task XS f
 | null | size has no effect | size rows: coverage 70–90%, Winkler score within 5% of the baseline's; `backtest` does not recommend size |
 | drift | tasks get 2× faster halfway | `backtest` picks the 90-day window, its Winkler score at least 15% below "all", and `estimate` uses it |
 | test-heavy | a third of tasks carry 5× their code in tests | each lands in the bucket of its product-code size, and is flagged test-heavy |
-| break-point | width doubles above L; 60 tasks per bucket | the advisor names L or the bucket next to it, and every proposed slice is below the break |
+| break-point | width doubles above L; 60 tasks per bucket | the advisor names L or the bucket next to it; the slices together cover the task's areas, each is below the break, and the replay shows split tasks finishing sooner in total |
 | no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
-| thin | 30 tasks | backtest and estimate refuse with their messages |
+| thin | 30 tasks, at most 3 per size | `backtest` refuses; `estimate` says the size has too little history and gives the size-blind range |
 
 The same generator gives new users a sample history to try the commands on.
 
