@@ -23,6 +23,21 @@ python3 examples/sample_history.py data/sample.tasks.jsonl
    next to the range you would get without a size.
 5. **Log and score.** `--log` records the estimate. `score` later compares it with what happened.
 
+For example, a task whose first commit lands on Friday at 15:00 and whose PR merges on Monday at
+11:00 took 68 hours on the clock but 5 working hours:
+
+```mermaid
+gantt
+  title One task: 68 hours elapsed, 5 working hours
+  dateFormat YYYY-MM-DD HH:mm
+  axisFormat %a %H:%M
+  section Counted
+  Friday afternoon, 3 h  :done, 2026-01-09 15:00, 3h
+  Monday morning, 2 h    :done, 2026-01-12 09:00, 2h
+  section Not counted
+  Evening, weekend, night  :2026-01-09 18:00, 63h
+```
+
 A task file is one JSON object per line:
 
 ```json
@@ -30,6 +45,31 @@ A task file is one JSON object per line:
 ```
 
 ## Reading `backtest`
+
+The backtest walks the history in start order. For each task it builds the range a method would
+have given that day, then checks where the real duration landed. Only tasks that had already
+finished count as history:
+
+```mermaid
+gantt
+  title Estimating task T: which past tasks it may use
+  dateFormat YYYY-MM-DD
+  axisFormat %d %b
+  section Used
+  A finished before T started  :done, 2026-01-05, 2026-01-12
+  section Not used
+  B still open when T started  :active, 2026-01-10, 2026-01-20
+  C started after T            :2026-01-16, 2026-01-22
+  section Estimated
+  T                            :crit, 2026-01-14, 2026-01-21
+```
+
+The tasks are then split in three, in time order:
+
+```mermaid
+flowchart LR
+  H["Tasks 0-149<br/>history only"] --> T["Tasks 150-269<br/>tune: compare methods, pick one"] --> L["Tasks 270-299<br/>locked: read once, after picking"]
+```
 
 ```text
 tasks: 300  tune: [150,270)  locked: [270,300)  level=0.8  locked from 2026-05-27
@@ -111,6 +151,23 @@ your own estimates.
   probe is not failing everything. All 24 are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
+
+Each generated world has a pass rule the other world would fail:
+
+```mermaid
+flowchart LR
+  W1["Size drives duration"] --> P1["size beats the baseline by 15% or more,<br/>coverage 75-95%"]
+  W0["Size has no effect"] --> P0["size does not beat the baseline<br/>by more than 5%"]
+```
+
+The mutation probe checks the tests themselves:
+
+```mermaid
+flowchart LR
+  B["Plant one known bug"] --> S["Run the suite"] --> K{"Suite fails?"}
+  K -- yes --> OK["Caught"]
+  K -- no --> GAP["A gap in the tests"]
+```
 
 ## Limits
 
