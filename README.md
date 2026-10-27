@@ -36,8 +36,8 @@ flowchart LR
 **1. A task is a unit of delivered work.** That's the commits sharing a tracker key (`ABC-123` or `#123`), or
 the pull requests closing the same issue.
 
-**2. Its cycle time counts working hours only.** The clock runs from the first commit to the last
-merge. With the git-only source the end is the merge commit that landed the work when the history has
+**2. Its cycle time counts working hours only.** The clock runs from the first commit (or the
+PR opening, if that came first) to the last merge. With the git-only source the end is the merge commit that landed the work when the history has
 one. In a squash-merged history it is the last commit carrying the key: a commit span, which leaves out
 review and merge waiting. A tracker key wins over `#123`; in a squash-merged GitHub history with no
 tracker keys, the `(#123)` suffix is the pull request number, so each pull request is its own task. Only Mon–Fri, 09:00–18:00 in your timezone counts. Then three things come out:
