@@ -76,6 +76,45 @@ Proposals only; nothing is rewritten.
   `excluded` spans.
 - Lines and paths come from git by matching the issue key in commit messages, as `git-tasks` does.
 
+## Evals — is the answer right?
+
+Unit tests show the code does what it says. Evals show the numbers are worth trusting. Three layers.
+
+**1. Simulated history with known truth (v0.2, runs in CI).** `cc-estimate simulate --scenario <name>
+--seed <n> --out <dir>` writes a `tasks.jsonl` and, for the git source, a real git repository built
+from the same tasks. Durations are drawn from a stated model, so the right answer is known. Fixed
+seeds; each scenario asserts a band, not an exact number.
+
+| Scenario | World | Must hold |
+|---|---|---|
+| size-matters | duration grows with size | coverage 70–90%; size rows beat the baseline |
+| null | size has no effect | no size row beats the baseline by more than noise |
+| drift | tasks get 2× faster halfway | the 90-day window beats "all" |
+| test-heavy | agents add many test lines | sizing on product code keeps them out of XL |
+| break-point | width doubles above L | the advisor finds the break within one bucket |
+| no-break | width grows smoothly | the advisor gives no advice |
+| thin | 30 tasks | backtest and estimate refuse with their messages |
+
+The same generator gives new users a sample history to try the commands on.
+
+**2. Self-check on the user's own history (v0.2).** `backtest` adds per-bucket coverage and one line
+per feature: "trust it here", "too little data" or "does not help here". For the advisor it replays
+past split and single tasks of the same total size. This is what tells a user whether the tool works
+on their project; the simulated layer only shows the method can work.
+
+**3. Skill evals (before each release, by hand).** `plugin/cc-estimate/evals/` holds cases for
+`claude plugin eval`, run against a simulated repository, with a no-plugin baseline arm
+(`--ablation with-without`). Cases:
+
+- asks for a size when none is given;
+- reports the range, N and data date as the command printed them, with no made-up single number;
+- logs the estimate;
+- declines to compare two people;
+- recommends a split for a large multi-area task (v0.2);
+- says there is not enough history when there is not.
+
+Not in CI: each run costs model calls. The release checklist records the pass rate and cost.
+
 ## Out of scope
 
 Linear (same two paths later), similar-task retrieval, GitLab and Azure DevOps sources, any
