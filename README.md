@@ -152,7 +152,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login,
-a PR title (titles can name people) or a single PR's numbers. `summary` prints totals per size
+a PR title (titles can name people) or the numbers of someone else's PR. `summary` prints totals per size
 bucket and hides the numbers of a bucket with fewer than five PRs or three authors; the size table
 in `backtest` does the same. `ci` adds its results to the history file and prints only a count.
 `fetch` writes only to a file. The test suite runs `tasks`, `spans`, `backtest`, `estimate`,
