@@ -2,7 +2,7 @@
 """history.py - measure how long merged PRs really took, and what drove it.
 
 Generic: works on any GitHub repo the `gh` CLI can read. Repo- and team-specific
-settings live in a JSON config file (see config.example.json). Stdlib only.
+settings live in a JSON config file (see `cc-estimate init`). Stdlib only.
 
   python3 history.py fetch   --repo OWNER/NAME [--days 120] [--config cfg.json] [--out prs.jsonl]
   python3 history.py ci      --repo OWNER/NAME --prs 12,34 [--in prs.jsonl]   # expensive CI detail
@@ -730,7 +730,7 @@ def cmd_summary(a):
             if not r:
                 L.append(f"## PR #{num}\n\nNot in the data set.")
                 continue
-            L.append(f"## PR #{num}: {r['title']}\n")
+            L.append(f"## PR #{num}\n")  # titles are free text and can name people
             r = {**r, "review": {k: v for k, v in r["review"].items() if k not in ("human_reviewers", "ai_review_bots")}}
             L.append("```json\n" + json.dumps({k: r[k] for k in ("created_at", "merged_at", "first_commit_at",
                      "last_commit_at", "size", "commits", "commits_by_author", "time", "phases_weekdays", "review", "ai", "ci", "risk_tier")},

@@ -1,5 +1,8 @@
 """cc-estimate <command> [options]   (each command has its own --help)
 
+Start:
+  init       write a starter cc-estimate.json to edit
+
 Build the history. Pick one source, then refresh monthly:
   git-tasks  from local git only; any tracker key in commit messages (ABC-123, #123)
   fetch      GitHub: merged PRs                   -> data/<repo>.jsonl
@@ -16,9 +19,20 @@ Use it:
   score      compare your logged estimates with what happened
   summary    a markdown report of the PR history
 """
+import shutil
 import sys
+from pathlib import Path
 
 from . import backtest, classify, estimate, gitsource, history, links, spans, tasks
+
+
+def init(args):
+    out = Path(args[args.index("--out") + 1] if "--out" in args else "cc-estimate.json")
+    if out.exists():
+        sys.exit(f"cc-estimate: {out} already exists; not overwriting.")
+    shutil.copyfile(Path(__file__).with_name("config.example.json"), out)
+    print(f"Wrote {out}. Set repo, source and timezone.")
+    return 0
 
 
 def main(argv=None):
@@ -27,6 +41,8 @@ def main(argv=None):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
+    if cmd == "init":
+        return init(rest)
     if cmd in ("fetch", "summary", "ci"):
         return history.main([cmd, *rest])
     if cmd in ("estimate", "attach", "score"):

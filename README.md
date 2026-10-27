@@ -85,7 +85,7 @@ Requires Python 3.10+. No dependencies. The GitHub source also needs an authenti
 
 ```bash
 pip install git+https://github.com/Nachox07/cc-estimate
-cp config.example.json cc-estimate.json     # set repo, source, timezone
+cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone
 ```
 
 **From git only** (Jira, Linear or any key in commit messages; set `"source": "git"`):
@@ -141,7 +141,7 @@ filed under, and link the commits to it.
 
 Repo-specific behaviour lives in `cc-estimate.json`: bots to ignore, timezone, absence, labels
 that mean "not working", and the `classifier` hooks for approval and test-suite rules. See
-`config.example.json`. `default_branch` (default `main`) names the branch work lands on.
+[`config.example.json`](cc_estimate/config.example.json). `default_branch` (default `main`) names the branch work lands on.
 `git.key_regex` takes one pattern or a list tried in order; pass `--config` to `git-tasks` to use it.
 `classifier.default_branch` is different: the git ref the classifier reads paths from, such as
 `origin/main`.
@@ -150,8 +150,9 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
-or numbers: per-person data is used only to log and score your own estimates. The test suite runs
-`tasks`, `spans`, `backtest`, `estimate`, `score`, `summary` and `git-tasks` on a three-person
+or numbers, or a PR title (titles can name people). Per-person data is used only to log and score
+your own estimates. The test suite runs
+`tasks`, `spans`, `backtest`, `estimate`, `summary` and `git-tasks` on a three-person
 fixture and fails if another login appears. `fetch` writes only to a file. Cycle time
 mostly measures waiting, not effort, so don't use it to compare people.
 

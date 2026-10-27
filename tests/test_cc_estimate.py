@@ -111,7 +111,7 @@ def history_records(n=60):
     """PR records shaped like `fetch` output, authored by the three fixture logins."""
     out = []
     for i in range(1, n + 1):
-        out.append(dict(number=i, title=f"feat: change {i}", author=LOGINS[i % 3], commits_by_author=1,
+        out.append(dict(number=i, title=f"feat: change {i}, thanks @{LOGINS[(i + 1) % 3]}", author=LOGINS[i % 3], commits_by_author=1,
                         created_at="2026-10-05T09:00:00Z", merged_at="2026-10-06T09:00:00Z",
                         first_commit_at="2026-10-05T08:00:00Z", last_commit_at="2026-10-06T08:00:00Z", commits=2,
                         size={"lines": {"code": 40 * i, "tests": 10, "docs": 0}, "changed_files": 3},
@@ -443,6 +443,20 @@ class SmallHistory(unittest.TestCase):
     def test_empty_or_all_recent_history_says_so(self):
         self.assertIn("too few to backtest", self.run_backtest([]))
         self.assertIn("too few to backtest", self.run_backtest(task_rows(10)))
+
+
+class Init(unittest.TestCase):
+    def test_writes_a_starter_config_and_never_overwrites(self):
+        from cc_estimate.__main__ import main as cli
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "cc-estimate.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli(["init", "--out", str(out)])
+            self.assertEqual(json.loads(out.read_text())["default_branch"], "main")
+            out.write_text("{}")
+            with self.assertRaises(SystemExit):
+                cli(["init", "--out", str(out)])
+            self.assertEqual(out.read_text(), "{}")
 
 
 class EveryCommandPrivacy(unittest.TestCase):
