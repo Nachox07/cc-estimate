@@ -723,7 +723,7 @@ def cmd_summary(a):
         rs = [r for r in recs if lo <= r["size"]["lines"]["code"] < hi]
         ph = lambda k: fmt(pct([r["phases_weekdays"][k] for r in rs], 50)) if len(rs) >= MIN_CELL else "-"
         L.append(f"| {lab} | {ph('coding')} | {ph('wait_first_human_review')} | {ph('first_human_review_to_merge')} | "
-                 f"{sum(1 for r in rs if not r['review']['first_human_review_at'])} |")
+                 f"{sum(1 for r in rs if not r['review']['first_human_review_at']) if len(rs) >= MIN_CELL else '-'} |")
     text = "\n".join(L) + "\n"
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)

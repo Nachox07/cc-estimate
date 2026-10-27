@@ -426,6 +426,12 @@ class SmallHistory(unittest.TestCase):
                 bt.main(["--in", str(Path(tmp) / "t.jsonl")])
             return buf.getvalue()
 
+    def test_a_size_with_too_few_tasks_prints_no_durations(self):
+        rows = task_rows(80)
+        rows[10] = {**rows[10], "lines": 9000}
+        line = next(l for l in self.run_backtest(rows).splitlines() if l.strip().startswith("XL"))
+        self.assertNotIn("p50", line)
+
     def test_split_scales_down_and_keeps_a_locked_slice(self):
         self.assertEqual(bt.split(100, 200), (50, 90))
         self.assertEqual(bt.split(1000, 200), (200, 840))
@@ -473,6 +479,8 @@ class SummaryBuckets(unittest.TestCase):
                 history.main(["summary", "--in", str(f)])
         row = next(l for l in buf.getvalue().splitlines() if l.startswith("| >5000 | 1 "))
         self.assertNotRegex(row, r"\d+\.\d")
+        phase_row = [l for l in buf.getvalue().splitlines() if l.startswith("| >5000 |")][-1]
+        self.assertEqual(phase_row.replace(" ", ""), "|>5000|-|-|-|-|")
 
 
 class StarterConfig(unittest.TestCase):
