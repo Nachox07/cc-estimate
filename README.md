@@ -153,7 +153,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 
 ## Testing
 
-`python3 -m pytest` runs the suite. It covers each rule on small hand-made inputs, checks that no
+`python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small hand-made inputs, checks that no
 estimate can see the future, and runs generated histories where size matters and where it does
 not: size must win clearly in the first and must not win in the second, across five seeds.
 `python3 tests/mutation_probe.py` plants 24 known bugs one at a time and confirms the suite
