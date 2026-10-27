@@ -90,10 +90,10 @@ the baseline passes `null` but fails `size-matters`, and calling every task XS f
 | Scenario | World | Must hold |
 |---|---|---|
 | size-matters | duration grows with size | size rows: coverage 70–90% and a Winkler score at least 15% below the baseline's |
-| null | size has no effect | every size row's Winkler score is within 5% of the baseline's, or worse |
-| drift | tasks get 2× faster halfway | the 90-day window's Winkler score beats "all" |
+| null | size has no effect | size rows: coverage 70–90%, Winkler score within 5% of the baseline's; `backtest` does not recommend size |
+| drift | tasks get 2× faster halfway | `backtest` picks the 90-day window, its Winkler score at least 15% below "all", and `estimate` uses it |
 | test-heavy | a third of tasks carry 5× their code in tests | each lands in the bucket of its product-code size, and is flagged test-heavy |
-| break-point | width doubles above L; 60 tasks per bucket | the advisor names L or the bucket next to it |
+| break-point | width doubles above L; 60 tasks per bucket | the advisor names L or the bucket next to it, and every proposed slice is below the break |
 | no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
 | thin | 30 tasks | backtest and estimate refuse with their messages |
 
