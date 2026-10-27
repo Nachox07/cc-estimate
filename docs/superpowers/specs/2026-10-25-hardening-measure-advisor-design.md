@@ -83,16 +83,18 @@ Unit tests show the code does what it says. Evals show the numbers are worth tru
 **1. Simulated history with known truth (v0.2, runs in CI).** `cc-estimate simulate --scenario <name>
 --seed <n> --out <dir>` writes a `tasks.jsonl` and, for the git source, a real git repository built
 from the same tasks. Durations are drawn from a stated model, so the right answer is known. Fixed
-seeds; each scenario asserts a band, not an exact number.
+seeds; each scenario asserts a band, not an exact number. All comparisons are on the same locked
+slice. The scenarios work in pairs, so a method cannot pass by doing nothing: always falling back to
+the baseline passes `null` but fails `size-matters`, and calling every task XS fails `test-heavy`.
 
 | Scenario | World | Must hold |
 |---|---|---|
-| size-matters | duration grows with size | coverage 70–90%; size rows beat the baseline |
-| null | size has no effect | no size row beats the baseline by more than noise |
-| drift | tasks get 2× faster halfway | the 90-day window beats "all" |
-| test-heavy | agents add many test lines | sizing on product code keeps them out of XL |
-| break-point | width doubles above L | the advisor finds the break within one bucket |
-| no-break | width grows smoothly | the advisor gives no advice |
+| size-matters | duration grows with size | size rows: coverage 70–90% and a Winkler score at least 15% below the baseline's |
+| null | size has no effect | every size row's Winkler score is within 5% of the baseline's, or worse |
+| drift | tasks get 2× faster halfway | the 90-day window's Winkler score beats "all" |
+| test-heavy | a third of tasks carry 5× their code in tests | each lands in the bucket of its product-code size, and is flagged test-heavy |
+| break-point | width doubles above L; 60 tasks per bucket | the advisor names L or the bucket next to it |
+| no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
 | thin | 30 tasks | backtest and estimate refuse with their messages |
 
 The same generator gives new users a sample history to try the commands on.
