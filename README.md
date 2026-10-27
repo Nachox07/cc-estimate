@@ -153,11 +153,12 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
 or numbers, or a PR title (titles can name people). `summary` prints totals per size bucket, never a
-single PR, and leaves out the numbers of any bucket with fewer than five PRs (so does `backtest`); `ci` adds its results to the history file and prints only a count. Per-person data is used only to log and score
-your own estimates. The test suite runs
-`tasks`, `spans`, `backtest`, `estimate`, `summary` and `git-tasks` on a three-person
-fixture and fails if another login appears. `fetch` writes only to a file. Cycle time
-mostly measures waiting, not effort, so don't use it to compare people.
+single PR, and leaves out the numbers of any bucket with fewer than five PRs or three authors (so
+does `backtest`); `ci` adds its results to the history file and prints only a count. Per-person data
+is used only to log and score your own estimates. The test suite runs `tasks`, `spans`, `backtest`,
+`estimate`, `summary` and `git-tasks` on a three-person fixture and fails if another login appears.
+`fetch` writes only to a file. Cycle time mostly measures waiting, not effort, so don't use it to
+compare people.
 
 ## Status and roadmap
 

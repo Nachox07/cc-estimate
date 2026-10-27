@@ -432,6 +432,13 @@ class SmallHistory(unittest.TestCase):
         line = next(l for l in self.run_backtest(rows).splitlines() if l.strip().startswith("XL"))
         self.assertNotIn("p50", line)
 
+    def test_a_size_done_by_one_person_prints_no_durations(self):
+        rows = task_rows(80)
+        for i in range(10, 16):
+            rows[i] = {**rows[i], "lines": 9000, "author": "alice"}
+        line = next(l for l in self.run_backtest(rows).splitlines() if l.strip().startswith("XL"))
+        self.assertNotIn("p50", line)
+
     def test_split_scales_down_and_keeps_a_locked_slice(self):
         self.assertEqual(bt.split(100, 200), (50, 90))
         self.assertEqual(bt.split(1000, 200), (200, 840))
@@ -479,6 +486,14 @@ class SummaryBuckets(unittest.TestCase):
                 history.main(["summary", "--in", str(f)])
         row = next(l for l in buf.getvalue().splitlines() if l.startswith("| >5000 | 1 "))
         self.assertNotRegex(row, r"\d+\.\d")
+        recs = [{**r, "author": "alice"} if r["size"]["lines"]["code"] < 300 else r for r in history_records()]
+        f2 = Path(tempfile.mkdtemp()) / "h.jsonl"
+        f2.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            history.main(["summary", "--in", str(f2)])
+        one_author = next(l for l in buf2.getvalue().splitlines() if l.startswith("| <300 |"))
+        self.assertEqual(one_author.replace(" ", ""), "|<300|7|-|-|")
         phase_row = [l for l in buf.getvalue().splitlines() if l.startswith("| >5000 |")][-1]
         self.assertEqual(phase_row.replace(" ", ""), "|>5000|-|-|-|-|")
 
