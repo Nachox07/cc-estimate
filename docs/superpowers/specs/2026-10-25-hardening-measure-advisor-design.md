@@ -76,6 +76,54 @@ Proposals only; nothing is rewritten.
   `excluded` spans.
 - Lines and paths come from git by matching the issue key in commit messages, as `git-tasks` does.
 
+## Evals — is the answer right?
+
+Unit tests show the code does what it says. Evals show the numbers are worth trusting. Three layers.
+
+**1. Simulated history with known truth (v0.2, runs in CI).** `cc-estimate simulate --scenario <name>
+--seed <n> --out <dir>` writes a `tasks.jsonl` and, for the git source, a real git repository built
+from the same tasks. Durations are drawn from a stated model, so the right answer is known. Fixed
+seeds; each scenario asserts a band, not an exact number. All comparisons are on the same locked
+slice. The scenarios work in pairs, so a method cannot pass by doing nothing: always falling back to
+the baseline passes `null` but fails `size-matters`, and calling every task XS fails `test-heavy`. Each
+scenario also runs `estimate` on fresh tasks drawn from the same world and checks that it uses what
+the backtest supports: the size range in `size-matters`, the size-blind range in `null`, the 90-day
+window in `drift`, and the product-code bucket in `test-heavy`.
+
+| Scenario | World | Must hold |
+|---|---|---|
+| size-matters | duration grows with size | size rows: coverage 70–90% and a Winkler score at least 15% below the baseline's |
+| null | size has no effect | size rows: coverage 70–90%, Winkler score within 5% of the baseline's; `backtest` does not recommend size |
+| drift | tasks get 2× faster 100 days before the end | `backtest` picks 60 or 90 days, scoring at least 15% better than "all"; `estimate` uses it and covers 70–90% of fresh tasks |
+| steady | no change over time, wide spread | `backtest` picks "all" or the longest window; `estimate` uses it and covers 70–90% of fresh tasks |
+| test-heavy | a third of tasks are M by product code and carry 5× that in tests, enough to make them XL if tests counted | each lands in the bucket of its product-code size and is flagged test-heavy; no other task is flagged |
+| break-point | width doubles from L to XL; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break, and the replay of those slices finishes sooner in total than the single task |
+| no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
+| slow-splits | a break at XL, but past split tasks took longer in total | the advisor gives no advice |
+| thin-advisor | a break at XL, 15 XL tasks | the advisor gives no advice and says history is too thin |
+| merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |
+| thin | 30 tasks, 27 of them S and 3 of them L | `backtest` refuses; `estimate --size L` says the size has too little history and gives the size-blind range |
+
+The same generator gives new users a sample history to try the commands on.
+
+**2. Self-check on the user's own history (v0.2).** `backtest` adds per-bucket coverage and one line
+per feature: "trust it here", "too little data" or "does not help here". For the advisor it replays
+past split and single tasks of the same total size. This is what tells a user whether the tool works
+on their project; the simulated layer only shows the method can work.
+
+**3. Skill evals (before each release, by hand).** `plugin/cc-estimate/evals/` holds cases for
+`claude plugin eval`, run against a simulated repository, with a no-plugin baseline arm
+(`--ablation with-without`). Cases:
+
+- asks for a size when none is given;
+- reports the range, N and data date as the command printed them, with no made-up single number;
+- logs the estimate;
+- declines to compare two people;
+- recommends a split for a large multi-area task (v0.2);
+- says there is not enough history when there is not.
+
+Not in CI: each run costs model calls. The release checklist records the pass rate and cost.
+
 ## Out of scope
 
 Linear (same two paths later), similar-task retrieval, GitLab and Azure DevOps sources, any
