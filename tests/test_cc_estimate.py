@@ -459,6 +459,21 @@ class Init(unittest.TestCase):
             self.assertEqual(out.read_text(), "{}")
 
 
+class StarterConfig(unittest.TestCase):
+    def test_estimate_with_paths_works_on_the_unedited_starter_config(self):
+        cfg = json.loads((Path(__file__).resolve().parents[1] / "cc_estimate" / "config.example.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "cfg.json").write_text(json.dumps(cfg))
+            write_tasks(d / "t.jsonl", task_rows(80))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                estimate.main(["estimate", "--config", str(d / "cfg.json"), "--tasks", str(d / "t.jsonl"),
+                               "--size", "M", "--paths", "src/api/"])
+            self.assertIn("approvals: not found", buf.getvalue())
+            self.assertIn("test tiers: not found", buf.getvalue())
+
+
 class EveryCommandPrivacy(unittest.TestCase):
     """Every command that runs without network, on a three-person fixture, prints no other login."""
 
@@ -475,7 +490,7 @@ class EveryCommandPrivacy(unittest.TestCase):
                 "spans": ["spans", "--tasks", str(d / "tasks.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "t3.jsonl")],
                 "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg],
                 "estimate": ["estimate", "--size", "M", "--config", cfg],
-                "summary": ["summary", "--in", str(d / "h.jsonl"), "--focus", "3"],
+                "summary": ["summary", "--in", str(d / "h.jsonl")],
                 "git-tasks": ["git-tasks", "--repo-dir", str(Path(__file__).resolve().parents[1]), "--since", "10 years ago",
                               "--out", str(d / "g.jsonl")],
             }
@@ -486,6 +501,8 @@ class EveryCommandPrivacy(unittest.TestCase):
                         cli(args)
                     for login in LOGINS:
                         self.assertNotIn(login, buf.getvalue())
+                    if name == "summary":  # a PR number leads straight to its author
+                        self.assertNotRegex(buf.getvalue(), r"#\d")
 
 
 if __name__ == "__main__":

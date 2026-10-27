@@ -84,11 +84,19 @@ def print_needs(paths, cfg):
         return
     # A directory stands for "some file under it", which is what the path rules match.
     files = [p + "_" if p.endswith("/") else p for p in paths]
-    groups = cl.approvals(files, cl.load_manifest(Path(c.get("repo_dir", ".")) / c["approval_manifest"])) if c.get("approval_manifest") else []
-    tiers = cl.tiers(files, c["tiers_cmd"], c.get("repo_dir")) if c.get("tiers_cmd") else []
-    slow = sorted(set(tiers or []) & set(c.get("heavy_tiers", [])))
     print("This change will need:")
-    print(f"  approvals: {', '.join(groups) + ' (security paths)' if groups else 'normal code review only'}")
+    manifest = Path(c.get("repo_dir", ".")) / c["approval_manifest"] if c.get("approval_manifest") else None
+    if manifest and not manifest.is_file():
+        print(f"  approvals: not found ({manifest}); set classifier in the config")
+    else:
+        groups = cl.approvals(files, cl.load_manifest(manifest)) if manifest else []
+        print(f"  approvals: {', '.join(groups) + ' (protected paths)' if groups else 'normal code review only'}")
+    try:
+        tiers = cl.tiers(files, c["tiers_cmd"], c.get("repo_dir")) if c.get("tiers_cmd") else []
+    except OSError as e:
+        print(f"  test tiers: not found ({e.strerror}); set classifier in the config")
+        return
+    slow = sorted(set(tiers or []) & set(c.get("heavy_tiers", [])))
     print(f"  test tiers: {', '.join(tiers) if tiers else 'none mapped'}" + (f"; slow ones: {', '.join(slow)}" if slow else ""))
 
 

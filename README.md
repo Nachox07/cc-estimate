@@ -58,7 +58,8 @@ will trigger. This is context; it doesn't change the number.
 
 **5. It proves itself before you rely on it.** `backtest` replays your history:
 - Each task is estimated using only tasks that had already finished when it started.
-- Scoring uses the most recent 20% of tasks, which are never used for tuning.
+- The oldest tasks only serve as history. Of the rest, the most recent 20% (at least 10) are
+  locked for scoring and never used for tuning.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
   finished.
 
@@ -107,8 +108,8 @@ cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config c
 ```bash
 cc-estimate spans    --tasks data/repo.tasks.jsonl --csv blocked.csv --out data/repo.tasks.jsonl   # optional
 cc-estimate backtest --in data/repo.tasks.jsonl --config cc-estimate.json
-cc-estimate estimate --size M --issue ABC-123 --paths src/api/ --log --config cc-estimate.json
-cc-estimate score    --config cc-estimate.json
+cc-estimate estimate --size M --issue 123 --paths src/api/ --log --config cc-estimate.json --tasks data/repo.tasks.jsonl
+cc-estimate score    --config cc-estimate.json --tasks data/repo.tasks.jsonl
 ```
 
 **In Claude Code:**
@@ -150,7 +151,8 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 
 Delivery history contains your colleagues' activity. The raw files hold their logins, which is why
 `data/`, the cache and `cc-estimate.json` are git-ignored. No command prints another person's login
-or numbers, or a PR title (titles can name people). Per-person data is used only to log and score
+or numbers, or a PR title (titles can name people). `summary` prints totals per size bucket, never a
+single PR; `ci` adds its results to the history file and prints only a count. Per-person data is used only to log and score
 your own estimates. The test suite runs
 `tasks`, `spans`, `backtest`, `estimate`, `summary` and `git-tasks` on a three-person
 fixture and fails if another login appears. `fetch` writes only to a file. Cycle time

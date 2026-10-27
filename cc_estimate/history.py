@@ -6,7 +6,7 @@ settings live in a JSON config file (see `cc-estimate init`). Stdlib only.
 
   python3 history.py fetch   --repo OWNER/NAME [--days 120] [--config cfg.json] [--out prs.jsonl]
   python3 history.py ci      --repo OWNER/NAME --prs 12,34 [--in prs.jsonl]   # expensive CI detail
-  python3 history.py summary --in prs.jsonl [--focus 1234] [--out summary.md]
+  python3 history.py summary --in prs.jsonl [--out summary.md]
 
 Design borrowed from prior art (ideas, not code paths): a sha256(query+vars) on-disk
 cache, node(id:) continuation paging for connections past 100 items, and date bisection
@@ -595,7 +595,9 @@ FAIL = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ERROR"}
 def cmd_ci(a):
     """Expensive (~10-30 GraphQL points per PR): distinct failing check runs and CI wall time."""
     owner, name = a.repo.split("/")
-    recs = [json.loads(l) for l in Path(a.inp).read_text().splitlines()] if a.inp and Path(a.inp).exists() else []
+    if not Path(a.inp).is_file():
+        sys.exit(f"ci: no PR history at {a.inp}; run fetch first")
+    recs = [json.loads(l) for l in Path(a.inp).read_text().splitlines()]
     want = {int(x) for x in a.prs.split(",")}
     res = {}
     for num in sorted(want):
@@ -654,7 +656,7 @@ def cmd_ci(a):
         with open(a.inp, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
-    print(json.dumps(res, indent=2))
+    print(f"Added CI data for {len(res)} PRs to {a.inp}.")
     print(json.dumps({"gh_calls": STATS["calls"], "graphql_points": STATS["points"]}), file=sys.stderr)
 
 
@@ -697,7 +699,7 @@ def cmd_summary(a):
              "(author dates, UTC unless configured). Weekdays = weekday dates from first commit (or PR open, if earlier) to merge, inclusive. "
              "Cells are median / p75 / p90.\n")
     excluded = [r for r in recs if r["commits_by_author"] == 0]
-    recs_all, recs = recs, [r for r in recs if r["commits_by_author"] > 0]
+    recs = [r for r in recs if r["commits_by_author"] > 0]
     L.append(f"Distributions exclude {len(excluded)} PRs with no commit authored by the PR author "
              "(bot-opened PRs, cherry-picks of someone else's commits); their active days are 0 by construction.\n")
     head = "| Bucket | PRs | Active days | Weekdays |\n|---|---|---|---|"
@@ -717,24 +719,6 @@ def cmd_summary(a):
         ph = lambda k: fmt(pct([r["phases_weekdays"][k] for r in rs], 50))
         L.append(f"| {lab} | {ph('coding')} | {ph('wait_first_human_review')} | {ph('first_human_review_to_merge')} | "
                  f"{sum(1 for r in rs if not r['review']['first_human_review_at'])} |")
-    L.append("\n## Ten largest PRs by changed code lines\n")
-    L.append("| PR | Code lines | Tests | Docs | Files | Active days | Weekdays | Rounds |\n|---|---|---|---|---|---|---|---|")
-    for r in sorted(recs_all, key=lambda r: -r["size"]["lines"]["code"])[:10]:
-        s = r["size"]
-        L.append(f"| #{r['number']} | {s['lines']['code']} | {s['lines']['tests']} | {s['lines']['docs']} | "
-                 f"{s['changed_files']} | {r['time']['active_days']} | {r['time']['weekdays_span']} | {r['review']['rounds']} |")
-    if a.focus:
-        L.append("")
-        for num in a.focus:
-            r = next((x for x in recs_all if x["number"] == num), None)
-            if not r:
-                L.append(f"## PR #{num}\n\nNot in the data set.")
-                continue
-            L.append(f"## PR #{num}\n")  # titles are free text and can name people
-            r = {**r, "review": {k: v for k, v in r["review"].items() if k not in ("human_reviewers", "ai_review_bots")}}
-            L.append("```json\n" + json.dumps({k: r[k] for k in ("created_at", "merged_at", "first_commit_at",
-                     "last_commit_at", "size", "commits", "commits_by_author", "time", "phases_weekdays", "review", "ai", "ci", "risk_tier")},
-                     indent=1) + "\n```")
     if a.notes and Path(a.notes).exists():
         L.append("\n" + Path(a.notes).read_text())
     text = "\n".join(L) + "\n"
@@ -760,10 +744,9 @@ def main(argv=None):
     f.add_argument("--workers", type=int, default=6)
     c = sp.add_parser("ci")
     c.add_argument("--repo", required=True); c.add_argument("--prs", required=True)
-    c.add_argument("--in", dest="inp")
+    c.add_argument("--in", dest="inp", required=True)
     s = sp.add_parser("summary")
     s.add_argument("--in", dest="inp", required=True)
-    s.add_argument("--focus", type=int, nargs="*")
     s.add_argument("--notes", help="markdown file appended verbatim")
     s.add_argument("--out")
     a = p.parse_args(argv)
