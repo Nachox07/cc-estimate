@@ -108,6 +108,26 @@ def load(path, tz, cfg=None, profiles=None):
     return rows
 
 
+MIN_CENSOR_DAYS = 21
+
+
+def window(rows, since=None, censor_days=None):
+    """Cut both edges of a merged-in-window fetch. Before the window only long-lived tasks are
+    present; near its end only fast ones are. Returns (kept, info) with the window start, cut, horizon and drop counts."""
+    if not rows:
+        return [], None
+    data_end = max(r["end"] for r in rows)
+    w0 = since or min(r["end"] for r in rows)  # a merged-in-window fetch has no end before its start
+    inside = [r for r in rows if r["start"] >= w0]
+    if censor_days is None:
+        mid = w0 + (data_end - w0) / 2
+        days = [(r["end"] - r["start"]).total_seconds() / 86400 for r in inside if r["start"] <= mid]
+        censor_days = max(MIN_CENSOR_DAYS, q(days, 0.9)) if days else MIN_CENSOR_DAYS
+    cut = data_end - timedelta(days=censor_days)
+    kept = [r for r in inside if r["start"] <= cut]
+    return kept, dict(start=w0, cut=cut, horizon=censor_days, early=len(rows) - len(inside), late=len(inside) - len(kept))
+
+
 def add_load(rows):
     """Work already in flight when a task starts: tasks open at that moment, overall and among those
     needing an approval group this task also needs. Both are knowable at the start."""
@@ -252,16 +272,16 @@ def main(argv=None):
     ap.add_argument("--level", type=float, default=0.8)
     ap.add_argument("--config")
     ap.add_argument("--profiles", help="profiles jsonl from classify.py")
-    ap.add_argument("--censor-days", type=int, default=21,
-                    help="drop tasks starting this close to the data end: their slow siblings are still open")
+    ap.add_argument("--censor-days", type=float,
+                    help="drop tasks starting this close to the data end: their slow siblings are still open "
+                         "(default: learned from the data, at least 21)")
+    ap.add_argument("--since", help="start of the fetched window, YYYY-MM-DD (default: the earliest task end)")
     a = ap.parse_args(argv)
     profiles = {p["id"]: p for p in map(json.loads, Path(a.profiles).read_text().splitlines())} if a.profiles else {}
     cfg = json.loads(Path(a.config).read_text()) if a.config else {}
     rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles)
-    data_end = max((r["end"] for r in rows), default=None)
-    cut = data_end - timedelta(days=a.censor_days) if data_end else None
-    dropped = sum(r["start"] > cut for r in rows) if cut else 0
-    rows = [r for r in rows if r["start"] <= cut] if cut else []
+    since = datetime.fromisoformat(a.since).replace(tzinfo=ZoneInfo(a.tz or cfg.get("timezone", "UTC"))) if a.since else None
+    rows, win = window(rows, since, a.censor_days)
     n = len(rows)
     s = split(n, a.min_history)
     if not s:
@@ -270,7 +290,8 @@ def main(argv=None):
     first, lock = s
     bucket_load(rows, rows[:lock])
     lo_p, hi_p = (1 - a.level) / 2, 1 - (1 - a.level) / 2
-    print(f"dropped {dropped} tasks starting after {cut:%Y-%m-%d} (right-censoring)")
+    print(f"dropped {win['early']} tasks starting before {win['start']:%Y-%m-%d} (left-truncation: only long-lived ones reach the window)")
+    print(f"dropped {win['late']} tasks starting after {win['cut']:%Y-%m-%d} (right-censoring, horizon {win['horizon']:.1f} days)")
     nb = sum(r["y"] < r["y_raw"] - 0.01 for r in rows)
     print(f"tasks with blocked or absence time removed: {nb}")
     print(f"tasks: {n}  tune: [{first},{lock})  locked: [{lock},{n})  level={a.level}  locked from {rows[lock]['start']:%Y-%m-%d}")

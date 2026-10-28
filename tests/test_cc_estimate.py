@@ -483,6 +483,93 @@ class OutputFiles(unittest.TestCase):
             self.assertTrue((d / "not" / "yet" / "estimates.jsonl").exists())
 
 
+class Window(unittest.TestCase):
+    """A fetch keeps PRs merged in a window, so both ends of the task list are biased."""
+    T0 = datetime(2026, 4, 1, 9, tzinfo=UTC)
+
+    def row(self, start_day, days, **kw):
+        s = self.T0 + timedelta(days=start_day)
+        return scored_row(s, s + timedelta(days=days), days * 8, **kw)
+
+    def test_a_task_that_started_before_the_earliest_end_is_dropped(self):
+        rows = [self.row(-30, 40), self.row(0, 2), self.row(5, 3), self.row(10, 1), self.row(60, 1)]
+        kept, win = bt.window(rows)
+        self.assertEqual([r["start"] for r in kept], [r["start"] for r in rows[2:4]])
+        self.assertEqual(win["early"], 2)  # the long one and the one that ends first
+
+    def test_since_sets_the_window_start(self):
+        rows = [self.row(0, 2), self.row(5, 3), self.row(10, 1), self.row(60, 1)]
+        kept, win = bt.window(rows, since=self.T0 + timedelta(days=7))
+        self.assertEqual(win["early"], 2)
+        self.assertEqual(len(kept), 1)
+
+    def test_the_horizon_never_goes_below_21_days(self):
+        rows = [self.row(d, 1) for d in range(0, 100, 5)]
+        self.assertEqual(bt.window(rows)[1]["horizon"], 21)
+
+    def test_the_horizon_grows_when_early_tasks_take_long(self):
+        rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]
+        kept, win = bt.window(rows)
+        self.assertGreater(win["horizon"], 40)
+        self.assertEqual(win["cut"], max(r["end"] for r in rows) - timedelta(days=win["horizon"]))
+        self.assertTrue(all(r["start"] <= win["cut"] for r in kept))
+
+    def test_censor_days_overrides_the_learned_horizon(self):
+        rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]
+        self.assertEqual(bt.window(rows, censor_days=30)[1]["horizon"], 30)
+        self.assertEqual(bt.window(rows, censor_days=5)[1]["horizon"], 5)
+
+    def test_backtest_reports_both_cuts_and_the_horizon(self):
+        rows = self.history()
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", rows)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bt.main(["--in", str(Path(tmp) / "t.jsonl")])
+        out = buf.getvalue()
+        self.assertRegex(out, r"dropped \d+ tasks starting before 2026-")
+        self.assertRegex(out, r"right-censoring, horizon 21\.0 days")
+
+    def test_estimate_and_backtest_cut_the_same_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", self.history())
+            loaded = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {})
+            kept, _ = bt.window(loaded)
+            with mock.patch.object(estimate.bt, "window", wraps=bt.window) as w:
+                _, n, base, _ = estimate.ranges(str(Path(tmp) / "t.jsonl"), UTC, "S", {})
+            w.assert_called_once()
+        self.assertEqual(base, [round(bt.q([r["y"] for r in kept], p), 1) for p in (0.1, 0.5, 0.9)])
+
+    def history(self, survivors=0):
+        """Normal tasks of 4-20 hours, one every 12 hours. `survivors` very long tasks
+        started long before the window and end just after it opens."""
+        rnd = random.Random(3)
+        out = []
+        for i in range(survivors):
+            s = self.T0 - timedelta(days=200 + 10 * i)
+            out.append(dict(id=-i - 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                            end=(self.T0 + timedelta(days=1 + i)).isoformat(), lines=100, excluded={}))
+        for i in range(300):
+            s = self.T0 + timedelta(hours=12 * i)
+            out.append(dict(id=i + 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                            end=(s + timedelta(hours=rnd.uniform(4, 30))).isoformat(), lines=100, excluded={}))
+        return out
+
+    def locked_coverage(self, rows):
+        lock = int(len(rows) * 0.8)
+        return bt.score(bt.run(rows, list(range(lock, len(rows))), "baseline: repo", 10, 0.1, 0.9))["coverage"]
+
+    def test_cutting_survivors_moves_locked_coverage_toward_the_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", self.history(survivors=40))
+            raw = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {})
+        cut, win = bt.window(raw)
+        self.assertGreaterEqual(win["early"], 40)
+        before, after = self.locked_coverage(raw), self.locked_coverage(cut)
+        self.assertLess(abs(after - 0.8), abs(before - 0.8))
+        self.assertGreater(before, 0.9)
+
+
 class ThinHistory(unittest.TestCase):
     def run_estimate(self, rows, *extra):
         with tempfile.TemporaryDirectory() as tmp:
@@ -504,8 +591,9 @@ class ThinHistory(unittest.TestCase):
         t0 = datetime(2026, 1, 5, tzinfo=UTC)
         rows = [scored_row(t0, t0 + timedelta(days=1), y) for y in range(81)]
         newest = [scored_row(t0 + timedelta(days=200), t0 + timedelta(days=200), 0)]  # moves the censor cut-off
+        first = [scored_row(t0 - timedelta(days=3), t0 - timedelta(days=2), 0)]  # its end opens the window
         with mock.patch.object(Path, "exists", return_value=True), \
-                mock.patch.object(estimate.bt, "load", return_value=rows + newest):
+                mock.patch.object(estimate.bt, "load", return_value=first + rows + newest):
             sized, n, base, _ = estimate.ranges("t.jsonl", UTC, "S", {})
         self.assertEqual(sized, [8.0, 40.0, 72.0])
 

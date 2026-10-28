@@ -24,7 +24,6 @@ from .files import open_out
 LEVEL = 0.8
 LO_P, HI_P = (1 - LEVEL) / 2, 1 - (1 - LEVEL) / 2
 HOURS_PER_DAY = bt.DAY1 - bt.DAY0
-CENSOR_DAYS = 21
 MIN_N = 5
 
 
@@ -63,10 +62,9 @@ def ranges(tasks_path, tz, size, cfg):
     if not rows:
         sys.exit(f"{p} has no tasks.")
     newest = max(r["end"] for r in rows)
-    cut = newest - timedelta(days=CENSOR_DAYS)
-    rows = [r for r in rows if r["start"] <= cut]  # recent starts: only the fast ones have finished
+    rows, win = bt.window(rows)
     if len(rows) < MIN_N:
-        sys.exit(f"Only {len(rows)} finished tasks started before {cut:%Y-%m-%d}: not enough history yet.")
+        sys.exit(f"Only {len(rows)} finished tasks fall inside the window {win['start']:%Y-%m-%d} to {win['cut']:%Y-%m-%d}: not enough history yet.")
     same = [r["y"] for r in rows if r["size"] == size]
     rng = lambda ys: [round(bt.q(ys, LO_P), 1), round(bt.q(ys, 0.5), 1), round(bt.q(ys, HI_P), 1)]
     return (rng(same) if len(same) >= MIN_N else None), len(same), rng([r["y"] for r in rows]), newest
