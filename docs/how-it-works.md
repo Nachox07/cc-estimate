@@ -118,8 +118,11 @@ Without a size: 6.0-118.5 h.
 Read it as: eight in ten L tasks here finished in 2.7 to 7.6 working days. "Without a size" is the
 range for any task; the gap between the two lines is what the size buys you. When a size has fewer
 than five finished tasks, `estimate` says "Not enough history for size L" and prints only the
-size-blind range. Tasks that started in the last 21 days are left out, because only the quick
-ones among them have finished.
+size-blind range. `estimate` applies the same two cuts as `backtest`. Tasks that started
+before the earliest task end are left out, because only the long-lived ones of those are in the
+file. Tasks that started within the last stretch of the data are left out too, because only the quick
+ones among them have finished. That stretch is the 90th percentile of how long early tasks took, and
+never less than 21 days.
 
 With a `classifier` in the config, `--paths` adds what the change will go through, for example
 which approval groups and test suites the paths trigger. That is context; it does not change the

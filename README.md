@@ -63,8 +63,11 @@ will trigger. This is context; it doesn't change the number.
 - Each task is estimated using only tasks that had already finished when it started.
 - The oldest tasks only serve as history. Of the rest, the most recent 20% (at least 10) are
   locked for scoring and never used for tuning.
+- Tasks that started before the window are dropped, since only the long-lived ones reach it. The
+  window starts at the earliest task end, or at `--since`.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
-  finished.
+  finished. "Near" is learned: the 90th percentile of calendar duration for tasks from the first
+  half of the window, at least 21 days. `--censor-days` sets it by hand.
 
 The `size` rows assume you name the final size before you start, so they are a best case. Logged
 estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40
