@@ -18,12 +18,15 @@ Use it:
   attach     link a logged estimate to its PR
   score      compare your logged estimates with what happened
   summary    a markdown report of the PR history
+
+Try it without a history:
+  simulate   a made-up history with known truth -> <dir>/tasks.jsonl, truth.json
 """
 import shutil
 import sys
 from pathlib import Path
 
-from . import backtest, classify, estimate, gitsource, history, links, spans, tasks
+from . import backtest, classify, estimate, gitsource, history, links, simulate, spans, tasks
 
 
 def init(args):
@@ -48,7 +51,7 @@ def main(argv=None):
     if cmd in ("estimate", "attach", "score"):
         return estimate.main([cmd, *rest])
     modules = {"links": links, "tasks": tasks, "classify": classify, "backtest": backtest,
-               "git-tasks": gitsource, "spans": spans}
+               "git-tasks": gitsource, "spans": spans, "simulate": simulate}
     if cmd not in modules:
         sys.exit(f"cc-estimate: unknown command {cmd!r}. Run `cc-estimate --help`.")
     return modules[cmd].main(rest)

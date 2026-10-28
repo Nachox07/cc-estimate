@@ -126,6 +126,13 @@ On Claude Code versions without `--marketplace`, run `/plugin marketplace add Na
 then `/plugin install cc-estimate@cc-estimate`. The plugin's skill calls the `cc-estimate` command,
 so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimate`).
 
+## Try it without a history
+
+`cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
+(same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
+Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks). The tests
+use them to check that the numbers are right, not only that the code runs.
+
 ## Adapting it to your stack
 
 Everything downstream reads one file format, `tasks.jsonl`, one JSON object per task:
