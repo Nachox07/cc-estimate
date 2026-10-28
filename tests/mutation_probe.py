@@ -28,6 +28,7 @@ M = [
  ("gitsource.py", 'end = min(after, key=when) if after else last', 'end = max(after, key=when) if after else last', "git task ends at last merge, not first"),
  ("gitsource.py", 'end = min(after, key=when) if after else last', 'end = last', "git task ignores merge commits"),
  ("gitsource.py", 'key = find_key(MERGE_PR.sub("", m["text"]), patterns)', 'key = find_key(m["text"], patterns)', "merge-PR number taken as a key"),
+ ("jira.py", 'excluded={"blocked": spans} if spans else {}', 'excluded={}', "Jira blocked spans not excluded"),
  ("tasks.py", 'if r["base"] == branch and', 'if', "release-branch PRs kept as tasks"),
  ("tasks.py", 'and not any(b.search(r["author"] or "") for b in bot_re)]', ']', "bot PRs kept as tasks"),
  ("tasks.py", 'end=max(prs[n]["merged_at"] for n in ns)', 'end=min(prs[n]["merged_at"] for n in ns)', "task ends at first PR merge, not last"),

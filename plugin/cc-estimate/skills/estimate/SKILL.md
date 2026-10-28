@@ -27,6 +27,8 @@ The skill runs the `cc-estimate` command. If it is not installed: `pipx install 
 4. **Score on request:** `cc-estimate score`. Below 15 finished estimates, say it is too early to
    judge.
 
+For Jira history: with a connected Jira MCP, you may fetch the issues and their changelogs and write the same `tasks.jsonl` yourself (blocked periods under `excluded`); otherwise run `cc-estimate jira-tasks` (README, "Quick start").
+
 If the data date is more than a month old, rebuild the history (README, "Quick start") and rerun
 `cc-estimate backtest` to confirm size still beats the baselines.
 

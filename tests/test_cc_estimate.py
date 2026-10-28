@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import os, subprocess
 
-from cc_estimate import backtest as bt, estimate, gitsource, links, spans, tasks
+from cc_estimate import backtest as bt, estimate, gitsource, jira, links, spans, tasks
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -656,6 +656,188 @@ class EveryCommandPrivacy(unittest.TestCase):
                         self.assertNotIn(login, buf.getvalue())
                     if name == "summary":  # a PR number leads straight to its author
                         self.assertNotRegex(buf.getvalue(), r"#\d")
+
+
+SECRET = "tok-SYNTHETIC-0123456789"
+STATUSES = [{"name": n, "statusCategory": {"key": k}} for n, k in
+            [("To Do", "new"), ("In Progress", "indeterminate"), ("Blocked", "indeterminate"), ("Done", "done")]]
+
+
+def move(at, to, who=None):
+    items = [{"field": "status", "toString": to}] if who is None else [{"field": "assignee", "from": who[0], "to": who[1]}]
+    return {"created": at, "items": items}
+
+
+def issue(key, created, resolved, histories, assignee="acct-aaa", summary="Synthetic task"):
+    return {"key": key, "changelog": {"histories": histories, "total": len(histories)},
+            "fields": {"summary": summary, "status": {"name": "Done"}, "labels": ["demo"], "created": created,
+                       "resolutiondate": resolved, "assignee": {"accountId": assignee, "displayName": "Not Used"} if assignee else None}}
+
+
+DEMO1 = issue("DEMO-1", "2026-01-05T09:00:00.000+0100", "2026-01-08T12:00:00.000+0100", [
+    move("2026-01-05T09:30:00.000+0100", "Blocked"), move("2026-01-06T09:00:00.000+0100", "In Progress"),
+    move("2026-01-07T09:00:00.000+0100", "Blocked"), move("2026-01-08T12:00:00.000+0100", "Done")])
+DEMO2 = issue("DEMO-2", "2026-01-05T09:00:00.000+0100", "2026-01-09T10:00:00.000+0100", [
+    move("2026-01-06T10:00:00.000+0100", "In Progress"), move("2026-01-07T10:00:00.000+0100", "To Do"),
+    move("2026-01-08T10:00:00.000+0100", "In Progress"), move("2026-01-09T10:00:00.000+0100", "Done"),
+    move("2026-01-12T10:00:00.000+0100", None, ("acct-aaa", "acct-bbb"))])
+DEMO3 = issue("DEMO-3", "2026-01-05T09:00:00.000+0100", None, [move("2026-01-06T09:00:00.000+0100", "In Progress")])
+DEMO4 = issue("DEMO-4", "2026-01-05T09:00:00.000+0100", "2026-01-06T09:00:00.000+0100", [
+    move("2026-01-06T09:00:00.000+0100", "Done")], assignee=None)
+
+
+class FakeJira:
+    """Serves synthetic Jira responses in place of the network call."""
+    def __init__(self, pages, statuses=STATUSES, rate_limits=0, status_code=200, body=None):
+        self.pages, self.statuses, self.rate_limits, self.calls = pages, statuses, rate_limits, []
+        self.status_code, self.body = status_code, body
+
+    def __call__(self, method, url, headers, body):
+        self.calls.append((method, url, headers, json.loads(body) if body else None))
+        if self.status_code != 200:
+            return self.status_code, {}, json.dumps(self.body or {}).encode()
+        if self.rate_limits:
+            self.rate_limits -= 1
+            return 429, {"Retry-After": "3"}, b"{}"
+        if url.endswith("/rest/api/3/status"):
+            return 200, {}, json.dumps(self.statuses).encode()
+        token = (json.loads(body) or {}).get("nextPageToken")
+        i = int(token) if token else 0
+        page = {"issues": self.pages[i]}
+        if i + 1 < len(self.pages):
+            page["nextPageToken"] = str(i + 1)
+        else:
+            page["isLast"] = True
+        return 200, {}, json.dumps(page).encode()
+
+
+class JiraSource(unittest.TestCase):
+    ENV = {"JIRA_URL": "https://demo.example.invalid", "JIRA_EMAIL": "me@example.invalid", "JIRA_API_TOKEN": SECRET}
+
+    def run_cli(self, fake, cfg=None, extra=()):
+        d = tempfile.mkdtemp()
+        args = ["--jql", "project = DEMO", "--out", f"{d}/out/tasks.jsonl", *extra]
+        if cfg is not None:
+            Path(d, "cfg.json").write_text(json.dumps(cfg))
+            args += ["--config", f"{d}/cfg.json"]
+        out, err, sleeps = io.StringIO(), io.StringIO(), []
+        with mock.patch.dict(os.environ, self.ENV), mock.patch.object(jira, "_http", fake), \
+                mock.patch.object(jira, "_sleep", sleeps.append), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                jira.main(args)
+                code = None
+            except SystemExit as e:
+                code = str(e.code)
+        rows = [json.loads(l) for l in Path(d, "out/tasks.jsonl").read_text().splitlines()] if Path(d, "out/tasks.jsonl").exists() else []
+        return rows, out.getvalue() + err.getvalue(), code, sleeps
+
+    def test_pages_are_followed_until_the_last_one(self):
+        fake = FakeJira([[DEMO1], [DEMO2], [DEMO4]])
+        rows, _, _, _ = self.run_cli(fake)
+        self.assertEqual({r["id"] for r in rows}, {"DEMO-1", "DEMO-2", "DEMO-4"})
+        searches = [c for c in fake.calls if c[1].endswith("/search/jql")]
+        self.assertEqual([c[3].get("nextPageToken") for c in searches], [None, "1", "2"])
+        self.assertEqual(searches[0][3]["expand"], "changelog")
+
+    def test_blocked_then_in_progress_then_blocked_gives_two_spans_and_starts_at_the_first_in_progress(self):
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO1]]))
+        r = rows[0]
+        self.assertEqual(r["start"], "2026-01-06T09:00:00+01:00")
+        self.assertEqual(r["start_kind"], "transition")
+        self.assertEqual(r["excluded"]["blocked"], [["2026-01-05T09:30:00+01:00", "2026-01-06T09:00:00+01:00"],
+                                                    ["2026-01-07T09:00:00+01:00", "2026-01-08T12:00:00+01:00"]])
+        self.assertEqual(r["end"], "2026-01-08T12:00:00+01:00")
+
+    def test_blocked_spans_are_subtracted_from_working_time_downstream(self):
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO1]]))
+        d = tempfile.mkdtemp()
+        Path(d, "t.jsonl").write_text(json.dumps(rows[0]) + "\n")
+        y = bt.load(f"{d}/t.jsonl", ZoneInfo("Europe/Madrid"))[0]
+        self.assertLess(y["y"], y["y_raw"])
+
+    def test_a_task_without_an_in_progress_move_starts_at_creation_and_says_so(self):
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO4]]))
+        self.assertEqual((rows[0]["start"], rows[0]["start_kind"]), ("2026-01-05T09:00:00+01:00", "created"))
+
+    def test_unresolved_issues_are_skipped_and_counted(self):
+        rows, msg, _, _ = self.run_cli(FakeJira([[DEMO1, DEMO3]]))
+        self.assertEqual([r["id"] for r in rows], ["DEMO-1"])
+        self.assertIn("1 unresolved", msg)
+
+    def test_a_rate_limit_is_retried_after_the_advertised_wait(self):
+        rows, _, code, sleeps = self.run_cli(FakeJira([[DEMO1]], rate_limits=2))
+        self.assertIsNone(code)
+        self.assertEqual(sleeps, [3.0, 3.0])
+        self.assertEqual(len(rows), 1)
+
+    def test_the_token_is_sent_only_in_the_auth_header_and_never_printed(self):
+        fake = FakeJira([[DEMO1]])
+        _, msg, _, _ = self.run_cli(fake)
+        self.assertNotIn(SECRET, msg)
+        self.assertTrue(fake.calls[0][2]["Authorization"].startswith("Basic "))
+        failing = FakeJira([[]], status_code=401, body={"errorMessages": ["Unauthorized"]})
+        _, msg, code, _ = self.run_cli(failing)
+        self.assertIn("401", code)
+        self.assertIn("Unauthorized", code)
+        self.assertNotIn(SECRET, code + msg)
+
+    def test_a_missing_variable_is_named_without_printing_values(self):
+        with mock.patch.dict(os.environ, {**self.ENV, "JIRA_API_TOKEN": ""}), self.assertRaises(SystemExit) as cm:
+            jira.main(["--jql", "x", "--out", "/nonexistent/out.jsonl"])
+        self.assertIn("JIRA_API_TOKEN", str(cm.exception))
+        self.assertNotIn("me@example.invalid", str(cm.exception))
+
+    def test_author_is_the_assignee_at_resolution_mapped_through_users(self):
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO1, DEMO2]]), cfg={"jira": {"users": {"acct-aaa": "alice"}}})
+        by = {r["id"]: r for r in rows}
+        self.assertEqual(by["DEMO-1"]["author"], "alice")
+        self.assertEqual(by["DEMO-2"]["author"], "alice")  # reassigned after it was resolved
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO1, DEMO4]]))
+        by = {r["id"]: r for r in rows}
+        self.assertEqual(by["DEMO-1"]["author"], "acct-aaa")
+        self.assertEqual(by["DEMO-4"]["author"], "unassigned")
+        self.assertNotIn("Not Used", json.dumps(rows))
+
+    def test_blocked_statuses_come_from_the_config(self):
+        rows, _, _, _ = self.run_cli(FakeJira([[DEMO1]]), cfg={"jira": {"blocked_statuses": ["Waiting"]}})
+        self.assertEqual(rows[0]["excluded"], {})
+
+    def test_truncated_changelogs_are_completed_from_the_changelog_endpoint(self):
+        cut = json.loads(json.dumps(DEMO1))
+        cut["changelog"] = {"histories": DEMO1["changelog"]["histories"][:1], "total": 4}
+        base = FakeJira([[cut]])
+
+        def fake(method, url, headers, body):
+            if "/issue/DEMO-1/changelog" in url:
+                return 200, {}, json.dumps({"values": DEMO1["changelog"]["histories"], "isLast": True}).encode()
+            return base(method, url, headers, body)
+        rows, _, _, _ = self.run_cli(fake)
+        self.assertEqual(len(rows[0]["excluded"]["blocked"]), 2)
+
+    def test_without_a_repo_lines_are_zero_and_the_command_says_sizes_are_missing(self):
+        rows, msg, _, _ = self.run_cli(FakeJira([[DEMO1]]))
+        self.assertEqual((rows[0]["lines"], rows[0]["code_lines"]), (0, 0))
+        self.assertIn("sizes are missing", msg)
+
+    def test_lines_are_summed_by_path_class_for_commits_that_carry_the_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+                   "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, env=env)
+            git("init", "-q", "-b", "main")
+            for rel, n in [("src/a.py", 3), ("tests/test_a.py", 2), ("docs/x.md", 1)]:
+                Path(d, rel).parent.mkdir(exist_ok=True)
+                Path(d, rel).write_text("x\n" * n)
+            git("add", "."); git("commit", "-qm", "DEMO-1 add feature")
+            Path(d, "src/b.py").write_text("y\n" * 4); Path(d, "ignored.lock").write_text("z\n")
+            git("add", "."); git("commit", "-qm", "unrelated change")
+            rows, msg, _, _ = self.run_cli(FakeJira([[DEMO1, DEMO2]]), extra=["--repo-dir", d, "--since", "2020-01-01"])
+        by = {r["id"]: r for r in rows}
+        self.assertEqual((by["DEMO-1"]["code_lines"], by["DEMO-1"]["test_lines"], by["DEMO-1"]["doc_lines"]), (3, 2, 1))
+        self.assertEqual(by["DEMO-1"]["lines"], 6)
+        self.assertEqual(by["DEMO-2"]["lines"], 0)
+        self.assertNotIn("sizes are missing", msg)
 
 
 if __name__ == "__main__":

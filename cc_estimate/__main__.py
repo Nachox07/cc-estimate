@@ -5,6 +5,7 @@ Start:
 
 Build the history. Pick one source, then refresh monthly:
   git-tasks  from local git only; any tracker key in commit messages (ABC-123, #123)
+  jira-tasks Jira Cloud: resolved issues, status history, blocked time (JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN)
   fetch      GitHub: merged PRs                   -> data/<repo>.jsonl
   links      GitHub: issue links, label time spans -> data/<repo>.links.jsonl
   tasks      GitHub: group PRs into tasks         -> data/<repo>.tasks.jsonl
@@ -23,7 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import backtest, classify, estimate, gitsource, history, links, spans, tasks
+from . import backtest, classify, estimate, gitsource, history, jira, links, spans, tasks
 
 
 def init(args):
@@ -48,7 +49,7 @@ def main(argv=None):
     if cmd in ("estimate", "attach", "score"):
         return estimate.main([cmd, *rest])
     modules = {"links": links, "tasks": tasks, "classify": classify, "backtest": backtest,
-               "git-tasks": gitsource, "spans": spans}
+               "git-tasks": gitsource, "jira-tasks": jira, "spans": spans}
     if cmd not in modules:
         sys.exit(f"cc-estimate: unknown command {cmd!r}. Run `cc-estimate --help`.")
     return modules[cmd].main(rest)
