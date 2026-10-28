@@ -120,7 +120,7 @@ def generate(name, seed, n=None):
     rows, w = [], 0.0
     for i, s in enumerate(specs, 1):
         w += rnd.uniform(2, 14) if i > 1 else rnd.uniform(0, 4)
-        start = clock(round(w * 60 + rnd.uniform(0.1, 0.9)) / 60)  # whole-minute starts, never on the hour by design
+        start = clock(round(w * 60 + rnd.uniform(0.1, 0.9)) / 60)  # starts at a random minute, not on round hours
         end = clock(round((w + s["hours"]) * 3600) / 3600)
         rows.append(dict(id=f"SIM-{i}", title=rnd.choice(["feat: add", "fix: repair", "chore: tidy"]),
                          author=LOGINS[i % 3], labels=[], start=start.isoformat(), end=end.isoformat(),
