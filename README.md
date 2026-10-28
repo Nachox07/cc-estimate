@@ -37,7 +37,7 @@ flowchart LR
 ```
 
 **1. A task is a unit of delivered work.** That's the commits sharing a tracker key (`ABC-123` or `#123`), or
-the pull requests closing the same issue.
+the pull requests closing the same issue. A pull request that closes no issue is a task of its own.
 
 **2. Its cycle time counts working hours only.** The clock runs from the first commit (or the
 PR opening, if that came first) to the last merge. With the git-only source the end is the merge commit that landed the work when the history has
@@ -90,7 +90,7 @@ Requires Python 3.10+. No dependencies. The GitHub source also needs an authenti
 
 ```bash
 pip install git+https://github.com/Nachox07/cc-estimate
-cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone
+cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone, and clear the placeholder bot and absence entries
 ```
 
 **From git only** (Jira, Linear or any key in commit messages; set `"source": "git"`):
