@@ -50,9 +50,9 @@ tracker keys, the `(#123)` suffix is the pull request number, so each pull reque
 - **retired process steps**: if you removed a gate (say, a manual QA queue), list its labels and
   history stops charging tasks for it.
 
-**3. An estimate is a range, not a number.** You choose a size bucket, measured in changed lines
-including tests: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. You get the 10th–90th percentile
-of cycle time for finished tasks of that size: an 80% interval, in working days.
+**3. An estimate is a range, not a number.** You choose a size bucket, measured in changed lines of
+product code, tests and docs not counted: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. You get
+the 10th–90th percentile of cycle time for finished tasks of that size: an 80% interval, in working days.
 
 **4. You can see what the work will need.** Pass the paths you expect to change. If your repo
 encodes ownership or test selection in machine-readable files (a CODEOWNERS-style path list, a
@@ -136,7 +136,9 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 | `title`, `labels` | as known when the task started |
 | `author` | who delivered it; used only for that person's own estimates |
 | `start`, `end` | ISO-8601: first commit; last merge (or last commit, see above) |
-| `lines` | changed lines, tests and docs included |
+| `code_lines` | changed product-code lines; the size bucket comes from this |
+| `test_lines`, `doc_lines` | changed lines in tests and in docs, by the config's `tests_patterns` and `docs_patterns`; tests over 3x `code_lines` make a task test-heavy |
+| `lines` | all three added up. Files without `code_lines` still load, sized by `lines` |
 | `excluded` | `{"blocked": [[start, end], …], …}`: non-working periods |
 
 A new source is any script that writes those rows: a Jira or Linear API export, Azure DevOps,
