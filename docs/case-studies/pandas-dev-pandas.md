@@ -136,28 +136,46 @@ Fewer than 20 tasks of this size: treat the range as rough.
 
 **Does size beat the baselines on the locked slice? No.** On all 218 locked tasks, `size` has a
 Winkler score of 317.2 against 286.1 (repo), 211.3 (trailing 30d) and 200.3 (same author). Lower
-is better, so size is worse than all three. Its intervals are also the widest of the lot (414 h
-against 212-279 h), and its median error is the largest (23.3 h against 9.0-10.2 h). The tune
-slice agrees: size scores 471.6 against 469.1 (repo) and 456.1 (same author), a tie at best. On
-the planned M+ subset (21 locked tasks) size is again worse (623.1 against 208.2-290.7), and
-there are too few L+ tasks to score.
+is better, so size is worse than all three, and its ranges are the widest. The tune slice is a tie
+at best: 471.6 against 469.1 (repo).
 
-Other rows, as measured: `size+kind x pace` has the lowest locked Winkler score (177.7) with
-width 135.9 h and 0.93 coverage, and also did best on tune among the size rows (434.5). It is a
-tuned variant, so its tune-slice edge is not evidence by itself; the locked result is one read of
-218 tasks on one repo.
+**But this run is biased by how the history was sampled.** `fetch` takes PRs *merged* in the
+window. A PR that started long before the window is in the data only if it was still open on
+1 April, so early tasks are mostly long-lived ones. A PR that started near the end is in the data
+only if it merged quickly. The slices show it:
 
-**Coverage against the 80% target.** On the tune slice, coverage sits near the target (0.82-0.84
-for the main methods). On the locked slice every method is above it: baselines 0.96-1.00, size
-0.98. Coverage that high with wide intervals means the ranges are too generous, not well
-calibrated. The locked slice is the most recent six weeks; why it is covered so much more than the tune
-slice was not investigated.
+| slice | tasks | started | median h | p90 h | longest h |
+|---|---|---|---|---|---|
+| history | 200 | 2024-03-05 to 2026-04-09 | 116.6 | 889.8 | 4,939.7 |
+| tune | 870 | 2026-04-10 to 2026-08-19 | 10.0 | 216.0 | 837.0 |
+| locked | 218 | 2026-08-19 to 2026-09-10 | 8.9 | 87.2 | 207.0 |
 
-**Why size struggles here.** Median cycle time does rise with size (XS 9 h, S 27 h, M 63 h), but
-the spread inside each size is huge: the S p90 is 407 h and the M p90 is 794 h. A minority of
-long-lived PRs (open for weeks) dominate the upper end, so the 80% range for a size is mostly
-tail. L and XL have 7 and 13 tasks, and the XL median (9 h) is lower than M, which suggests large
-mechanical changes that merge quickly. Size is a weak signal for how long a PR waits.
+The history is full of slow outliers and the locked slice cannot contain any. That is why every
+method over-covers the locked slice (0.93-1.00) with wide ranges. The 21-day right-censoring in
+`backtest` is too short for a repo whose PRs can stay open for months, and nothing drops tasks
+that started before the window.
+
+**Rerun with tasks that started inside the window.** Keeping only tasks that started between
+2026-04-01 and 2026-08-01 (846 tasks; locked slice of 130 from 2026-07-13), and sizing by
+product-code lines only ([#15](https://github.com/Nachox07/cc-estimate/pull/15)):
+
+```text
+== LOCKED · all tasks ==
+  method                         n  cover  width_h medAE_h  winkler fallbk
+  baseline: repo               130   0.93    197.5    10.0    250.7   0.00
+  baseline: same author        130   0.87    144.4     9.6    247.5   0.32
+  size                         130   0.85    117.0     9.0    247.4   0.02
+  size+kind                    130   0.82    117.0    12.2    249.1   0.06
+```
+
+Size now gives ranges 40% narrower than the repo baseline (117 h against 198 h) at coverage close
+to the target (0.85), but its Winkler score is a tie (247.4 against 250.7). On pandas, in this
+window, knowing the size narrows the range without making it more right. The same filtered run
+with total lines instead of product-code lines scores 272.6, so counting tests made size worse.
+
+**Why size is a weak signal here.** Median cycle time rises with size, but the spread inside each
+size is huge, and much of a PR's life on a volunteer-run project is waiting for a maintainer. Size
+does not predict that wait.
 
 ## Caveats
 
@@ -168,7 +186,10 @@ mechanical changes that merge quickly. Size is a weak signal for how long a PR w
 - The tasks are GitHub-sourced, so the end is the real merge. A git-only run would end at the last
   commit and miss the review wait.
 - The `size` row is a best case: it uses the final changed-line count, which you would not know
-  at the start. It still lost, so a real call on size would do no better.
+  at the start. A real call on size would do no better.
+- The in-window filter was applied by hand for this study. Tasks that started near 1 August and
+  were still open on 1 October are missing, so the rerun is still slightly biased toward quick
+  tasks.
 - No absence or blocked time was removed. pandas labels were not mapped to `excluded_labels`.
 - One repo, one six-month window, one locked slice of 218 tasks. Do not read this as a verdict on
   size-based estimates in general; it says that on this repo, in this window, size did not help.
