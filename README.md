@@ -9,7 +9,7 @@ git, GitHub, or any tracker whose keys appear in commit messages (Jira, Linear, 
 ships as a CLI plus a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill.
 
 New here? [How it works](docs/how-it-works.md) walks through each command's output on a sample
-history, and how the tool is tested.
+history, and how the tool is tested. A run on a large public repository: [pandas case study](docs/case-studies/pandas-dev-pandas.md).
 
 ## Why
 
