@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import os, subprocess
 
-from cc_estimate import backtest as bt, estimate, gitsource, links, simulate, spans, tasks
+from cc_estimate import advise, backtest as bt, estimate, gitsource, links, simulate, spans, tasks
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -694,6 +694,8 @@ class EveryCommandPrivacy(unittest.TestCase):
             d = write(tmp, *synthetic(), {"repo": "acme/widgets", "timezone": "Europe/Madrid", "data_dir": "."})
             (d / "widgets.tasks.jsonl").write_text((d / "tasks.jsonl").read_text())
             (d / "h.jsonl").write_text("".join(json.dumps(r) + "\n" for r in history_records()))
+            (d / "plan.jsonl").write_text("".join(json.dumps(t) + "\n" for t in
+                [dict(id="a", size="XS", paths=["src/x.py"]), dict(id="b", size="S", paths=["src/y.py"]), dict(id="c", size="XL", paths=["src/lib/z.py", "ui/w.tsx"])]))
             (d / "s.csv").write_text("key,group,start,end\n1,blocked,2026-06-01T10:00:00Z,2026-06-01T12:00:00Z\n")
             cfg = str(d / "cfg.json")
             commands = {
@@ -701,6 +703,8 @@ class EveryCommandPrivacy(unittest.TestCase):
                 "spans": ["spans", "--tasks", str(d / "tasks.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "t3.jsonl")],
                 "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg],
                 "estimate": ["estimate", "--size", "M", "--config", cfg],
+                "advise": ["advise", "--size", "M", "--paths", "src/a.py", "--config", cfg, "--tasks", str(d / "tasks.jsonl")],
+                "advise plan": ["advise", "--plan", str(d / "plan.jsonl"), "--config", cfg, "--tasks", str(d / "tasks.jsonl")],
                 "summary": ["summary", "--in", str(d / "h.jsonl")],
                 "git-tasks": ["git-tasks", "--repo-dir", str(Path(__file__).resolve().parents[1]), "--since", "10 years ago",
                               "--out", str(d / "g.jsonl")],
@@ -819,3 +823,135 @@ class SimulatedScenarios(unittest.TestCase):
                 small = self.run_main(estimate.main, [*args, "--size", "S"])
                 self.assertIn("80% range:", small)
                 self.assertNotIn("Not enough history", small)
+
+
+class SizingAdvisor(unittest.TestCase):
+    """The advisor on histories with a known break point, on the same seeds as the other scenarios."""
+    SEEDS = range(7, 12)
+
+    def world(self, name, seed, strip_issues=False):
+        generated, _ = simulate.generate(name, seed)
+        if strip_issues:
+            generated = [{k: v for k, v in g.items() if k != "issues"} for g in generated]
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "tasks.jsonl"
+        simulate.write_rows(generated, path)
+        hist = advise.load_history(str(path), UTC, {})
+        return hist, advise.analyse(hist, UTC), simulate.PLANS.get(name, [])
+
+    def verdicts(self, name, seed, plan=None, history=True, **kw):
+        hist, an, default_plan = self.world(name, seed, **kw)
+        plan = [dict(t) for t in (plan or default_plan)]
+        merge = advise.merge_pairs(plan, {})
+        return {t["id"]: advise.verdict(t, plan, an if history else None, merge, hist, {}) for t in plan}
+
+    def test_break_point_world_names_xl_and_splits_only_the_xl_task(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                hist, an, plan = self.world("break-point", seed)
+                self.assertEqual(an["size_break"], "XL")
+                v = self.verdicts("break-point", seed)
+                self.assertEqual(v["big"][0], "Split")
+                self.assertEqual(v["mid"][0], "Keep")
+
+    def test_slices_cover_every_planned_file_and_each_is_below_the_break(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _, _, plan = self.world("break-point", seed)
+                slices = self.verdicts("break-point", seed)["big"][2]
+                self.assertEqual(sorted(p for s in slices for p in s["paths"]), sorted(plan[0]["paths"]))
+                self.assertTrue(all(advise.SIZES.index(s["size"]) < advise.SIZES.index("XL") for s in slices))
+
+    def test_slices_follow_dependency_order(self):
+        slices = self.verdicts("break-point", 7)["big"][2]
+        self.assertEqual([s["layer"] for s in slices], ["shared code", "services", "UI", "tests", "docs"])
+
+    def test_past_splits_in_the_break_point_world_finished_sooner_than_single_xl_tasks(self):
+        # The closest check to replaying the proposed slices: the slices are new, so the history of
+        # real splits stands in for them.
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                hist, _, _ = self.world("break-point", seed)
+                sets, singles = advise.split_sets(hist["rows"], UTC)
+                self.assertEqual(len(sets), simulate.SETS)
+                one = [r["y_raw"] for r in singles if r["size"] == "XL"]
+                self.assertLess(st_median([t for _, t in sets]), st_median(one))
+
+    def test_smooth_widths_give_no_advice_for_large_tasks(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                _, an, _ = self.world("no-break", seed)
+                self.assertIsNone(an["size_break"])
+                for verdict, why, _ in self.verdicts("no-break", seed).values():
+                    self.assertEqual(verdict, "No advice")
+                    self.assertIn("no size bucket", why)
+
+    def test_splits_that_took_longer_give_no_advice(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self.assertEqual(self.world("slow-splits", seed)[1]["size_break"], "XL")
+                verdict, why, _ = self.verdicts("slow-splits", seed)["big"]
+                self.assertEqual(verdict, "No advice")
+                self.assertIn("not faster in total", why)
+
+    def test_thin_history_gives_no_advice_and_says_so(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self.assertEqual(self.world("thin-advisor", seed)[1]["size_break"], "XL")
+                verdict, why, _ = self.verdicts("thin-advisor", seed)["big"]
+                self.assertEqual(verdict, "No advice")
+                self.assertIn("too thin", why)
+
+    def test_only_the_same_area_pair_of_small_tasks_merges(self):
+        for seed in self.SEEDS:
+            for history in (True, False):
+                with self.subTest(seed=seed, history=history):
+                    v = self.verdicts("merge-keep", seed, history=history)
+                    self.assertEqual({k: x[0] for k, x in v.items()},
+                                     {"a": "Merge", "b": "Merge", "c": "Keep", "d": "Keep", "e": "Keep"})
+
+    def test_history_without_parent_links_cannot_be_checked_and_gives_no_advice(self):
+        verdict, why, _ = self.verdicts("break-point", 7, strip_issues=True)["big"]
+        self.assertEqual(verdict, "No advice")
+        self.assertIn("no parent-issue links", why)
+
+    def test_a_break_needs_the_range_to_more_than_double(self):
+        def rows(spread):
+            return [dict(y=10 + spread * i / 19, author=LOGINS[i % 3]) for i in range(20)]
+        for factor, expect in ((1.9, None), (2.2, "S")):
+            with self.subTest(factor=factor):
+                members = {"XS": rows(10), "S": rows(10 * factor)}
+                self.assertEqual(advise.find_break(["XS", "S"], members)[0], expect)
+
+    def test_a_break_by_number_of_areas_is_found_when_areas_are_present(self):
+        def at(_areas, spread):
+            return [dict(y=10 + spread * i / 19, author=LOGINS[i % 3]) for i in range(20)]
+        members = {"1": at(1, 10), "2": at(2, 12), "3": at(3, 40), "4+": at(4, 40)}
+        self.assertEqual(advise.find_break(advise.AREA_GROUPS, members)[0], "3")
+
+    def test_output_names_the_break_the_ordering_rule_and_hides_small_groups(self):
+        hist, an, plan = self.world("break-point", 7)
+        out = []
+        advise.report([dict(t) for t in plan], hist, an, {}, out.append)
+        text = "\n".join(out)
+        self.assertIn("Break point by size: XL.", text)
+        self.assertIn("Ordered by the layer rule", text)
+        self.assertIn("No area data", text)
+        two = dict(hist, rows=[dict(r, author=LOGINS[i % 2]) for i, r in enumerate(hist["rows"])])
+        out = []
+        advise.report([dict(t) for t in plan], two, advise.analyse(two, UTC), {}, out.append)
+        self.assertIn("too few tasks or people to show", "\n".join(out))
+        self.assertNotRegex("\n".join(out), r"median [\d.]+ h, n=")
+
+    def test_advise_cli_reads_a_plan_file_and_prints_a_verdict_per_task(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as buf:
+            simulate.main(["--scenario", "break-point", "--seed", "7", "--out", tmp])
+            advise.main(["--plan", f"{tmp}/plan.jsonl", "--tasks", f"{tmp}/tasks.jsonl", "--config", f"{tmp}/none.json"])
+        self.assertIn("big (XL): Split.", buf.getvalue())
+        self.assertIn("mid (L): Keep.", buf.getvalue())
+
+
+def st_median(xs):
+    import statistics
+    return statistics.median(xs)

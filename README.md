@@ -130,8 +130,24 @@ so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimat
 
 `cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
 (same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
-Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks). The tests
-use them to check that the numbers are right, not only that the code runs.
+Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks), plus five
+for the advisor (`break-point`, `no-break`, `slow-splits`, `thin-advisor`, `merge-keep`), which also
+write a `plan.jsonl`. The tests use them to check that the numbers are right, not only that the code runs.
+
+## Should this task be split?
+
+```bash
+cc-estimate advise --size XL --paths src/lib/money.py src/api/orders.py ui/orders/list.tsx docs/orders.md
+cc-estimate advise --plan plan.jsonl     # JSON lines: id, size, paths
+```
+
+For each planned task it prints Split, Merge, Keep or No advice, with the reason in one sentence. The
+break point is the smallest size where the 80% range gets more than twice as wide as the size below.
+A Split lists slices in dependency order (shared code, services, UI, tests, docs; the patterns are
+in the config under `advise.layers`) with a range for each. There is no advice when the history has
+fewer than 20 tasks on either side of the break, or when past splits were not faster in total than
+single tasks, or when splits cannot be found (the git-only source has no parent issues). Two XS or S
+tasks in the same area get Merge. See [Reading `advise`](docs/how-it-works.md#reading-advise).
 
 ## Adapting it to your stack
 
@@ -165,7 +181,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small
 hand-made inputs, checks that no estimate can see the future, and runs generated histories where
 size matters and where it does not: size must win clearly in the first and must not win in the
-second, across five seeds. `python3 tests/mutation_probe.py` plants 24 known bugs one at a time and
+second, across five seeds. `python3 tests/mutation_probe.py` plants 26 known bugs one at a time and
 confirms the suite catches every one. Details: [How it
 works](docs/how-it-works.md#how-it-is-tested).
 
@@ -177,7 +193,7 @@ a PR title (titles can name people) or the numbers of someone else's PR. `summar
 bucket and hides the numbers of a bucket with fewer than five PRs or three authors; the size table
 in `backtest` does the same. `ci` adds its results to the history file and prints only a count.
 `fetch` writes only to a file. The test suite runs `tasks`, `spans`, `backtest`, `estimate`,
-`summary` and `git-tasks` on a three-person fixture and fails if another login appears.
+`summary`, `advise` and `git-tasks` on a three-person fixture and fails if another login appears.
 
 What this does not hide: `estimate` and the backtest scores are ranges over whoever did similar
 work. On a small team, a size most often done by one colleague mostly reflects their pace. Cycle
@@ -189,7 +205,7 @@ v0.1.1. Planned work:
 - Jira and Linear API sources.
 - Splitting cycle time into active work and waiting.
 - Similar-task retrieval to show the closest finished tasks beside the range.
-- A split / keep / merge check for tasks that are too big or too small.
+- Advisor diff mode: propose stacked pull requests from a branch diff.
 
 ## Credits
 
