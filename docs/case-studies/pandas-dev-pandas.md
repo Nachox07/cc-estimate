@@ -10,7 +10,7 @@ author did not write. Aggregate output only; no individual is named or measured.
 - Source: `github` (pull requests and the issues they close). No fallback to `git-tasks` was needed.
 - Timezone: `UTC`. pandas has contributors in many timezones, so the 09:00-18:00 Mon-Fri working
   day is an approximation (see caveats).
-- Counts: 1,671 merged PRs fetched; 1,566 kept after dropping bots and automation; 1,550 tasks
+- Counts: 1,671 merged PRs fetched; 1,566 kept (the tool drops bot and automation PRs; the other 105 were not itemised); 1,550 tasks
   (14 tasks hold more than one PR). 659 of the 1,550 tasks (43%) close at least one issue. The
   rest are PRs that close nothing, each its own task. So "most PRs close an issue" did not hold
   here; the issue links matter for a minority of tasks.
@@ -150,8 +150,8 @@ tuned variant, so its tune-slice edge is not evidence by itself; the locked resu
 **Coverage against the 80% target.** On the tune slice, coverage sits near the target (0.82-0.84
 for the main methods). On the locked slice every method is above it: baselines 0.96-1.00, size
 0.98. Coverage that high with wide intervals means the ranges are too generous, not well
-calibrated. The locked slice is the most recent six weeks and its tasks are quicker than the
-history before it, so ranges built from older tasks cover almost everything.
+calibrated. The locked slice is the most recent six weeks; why it is covered so much more than the tune
+slice was not investigated.
 
 **Why size struggles here.** Median cycle time does rise with size (XS 9 h, S 27 h, M 63 h), but
 the spread inside each size is huge: the S p90 is 407 h and the M p90 is 794 h. A minority of
