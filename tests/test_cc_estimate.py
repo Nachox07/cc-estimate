@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import os, subprocess
 
-from cc_estimate import backtest as bt, estimate, gitsource, links, spans, tasks
+from cc_estimate import backtest as bt, estimate, gitsource, links, simulate, spans, tasks
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -718,3 +718,104 @@ class EveryCommandPrivacy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SimulatedScenarios(unittest.TestCase):
+    """Histories drawn from a stated model, scored on the locked slice (the last tasks, read once)."""
+    SEEDS = range(7, 12)
+
+    def rows(self, name, seed):
+        generated, truth = simulate.generate(name, seed)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(generated, Path(tmp) / "t.jsonl")
+            return bt.load(str(Path(tmp) / "t.jsonl"), UTC, {}), truth
+
+    def locked_scores(self, name, seed):
+        rows, _ = self.rows(name, seed)
+        cut = max(r["end"] for r in rows) - timedelta(days=21)
+        rows = [r for r in rows if r["start"] <= cut]
+        _, lock = bt.split(len(rows), 200)
+        idx = list(range(lock, len(rows)))
+        return (bt.score(bt.run(rows, idx, "size", 10, 0.1, 0.9)),
+                bt.score(bt.run(rows, idx, "baseline: repo", 10, 0.1, 0.9)))
+
+    def test_same_scenario_and_seed_give_identical_files(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, \
+                contextlib.redirect_stdout(io.StringIO()):
+            for d in (a, b):
+                simulate.main(["--scenario", "size-matters", "--seed", "3", "--out", d])
+            for f in ("tasks.jsonl", "truth.json"):
+                self.assertEqual((Path(a) / f).read_text(), (Path(b) / f).read_text())
+
+    def test_truth_states_the_model_and_logins_are_generic(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            simulate.main(["--scenario", "null", "--seed", "7", "--out", tmp])
+            truth = json.loads((Path(tmp) / "truth.json").read_text())
+            logins = {json.loads(l)["author"] for l in (Path(tmp) / "tasks.jsonl").read_text().splitlines()}
+        self.assertEqual((truth["scenario"], truth["seed"]), ("null", 7))
+        self.assertIn("model", truth)
+        self.assertEqual(logins, set(simulate.LOGINS))
+
+    def test_durations_are_continuous_not_piled_up_at_zero_or_a_full_day(self):
+        for name in simulate.SCENARIOS:
+            with self.subTest(scenario=name):
+                rows, _ = self.rows(name, 7)
+                ys = [r["y"] for r in rows]
+                self.assertEqual(sum(y < 0.01 for y in ys), 0)
+                self.assertGreater(len({round(y, 3) for y in ys}), 0.9 * len(ys))
+
+    def test_size_matters_covers_70_to_90_percent_and_beats_the_baseline_clearly(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                size, repo = self.locked_scores("size-matters", seed)
+                self.assertTrue(0.70 <= size["coverage"] <= 0.90, size["coverage"])
+                self.assertLess(size["winkler"], 0.85 * repo["winkler"])
+
+    def test_null_world_size_stays_within_5_percent_of_the_baseline(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                size, repo = self.locked_scores("null", seed)
+                self.assertLessEqual(abs(size["winkler"] / repo["winkler"] - 1), 0.05)
+
+    def test_test_heavy_tasks_are_sized_by_product_code_and_flagged_alone(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                rows, truth = self.rows("test-heavy", seed)
+                heavy = set(truth["params"]["test_heavy_ids"])
+                self.assertEqual({r["id"] for r in rows if r["test_heavy"]}, heavy)
+                self.assertTrue(all(r["size"] == "M" for r in rows if r["id"] in heavy))
+                generated, _ = simulate.generate("test-heavy", seed)
+                self.assertTrue(all(bt.bucket(g["lines"]) == "XL" for g in generated if g["id"] in heavy))
+
+    def thin_history(self, seed):
+        generated, _ = simulate.generate("thin", seed)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "tasks.jsonl"
+        simulate.write_rows(generated, path)
+        (Path(tmp.name) / "cfg.json").write_text(json.dumps({"repo": "acme/widgets"}))
+        return tmp.name, path
+
+    def run_main(self, fn, argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fn(argv)
+        return buf.getvalue()
+
+    def test_thin_history_has_27_small_and_3_large_tasks(self):
+        rows, _ = self.rows("thin", 7)
+        sizes = [r["size"] for r in rows]
+        self.assertEqual((sizes.count("S"), sizes.count("L"), len(sizes)), (27, 3, 30))
+
+    def test_thin_history_is_refused_by_backtest_and_estimated_by_size_only_where_it_has_data(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                tmp, path = self.thin_history(seed)
+                self.assertIn("too few to backtest", self.run_main(bt.main, ["--in", str(path)]))
+                args = ["estimate", "--config", f"{tmp}/cfg.json", "--tasks", str(path)]
+                large = self.run_main(estimate.main, [*args, "--size", "L"])
+                self.assertIn("Not enough history for size L", large)
+                self.assertIn("Without a size:", large)
+                small = self.run_main(estimate.main, [*args, "--size", "S"])
+                self.assertIn("80% range:", small)
+                self.assertNotIn("Not enough history", small)
