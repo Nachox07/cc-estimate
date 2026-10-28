@@ -15,6 +15,7 @@ Then, optionally:
 
 Use it:
   estimate   a range for a new task; --log to record it
+  advise     split, merge or keep planned tasks, from the break point in your history
   attach     link a logged estimate to its PR
   score      compare your logged estimates with what happened
   summary    a markdown report of the PR history
@@ -26,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import backtest, classify, estimate, gitsource, history, links, simulate, spans, tasks
+from . import advise, backtest, classify, estimate, gitsource, history, links, simulate, spans, tasks
 
 
 def init(args):
@@ -51,7 +52,7 @@ def main(argv=None):
     if cmd in ("estimate", "attach", "score"):
         return estimate.main([cmd, *rest])
     modules = {"links": links, "tasks": tasks, "classify": classify, "backtest": backtest,
-               "git-tasks": gitsource, "spans": spans, "simulate": simulate}
+               "git-tasks": gitsource, "spans": spans, "simulate": simulate, "advise": advise}
     if cmd not in modules:
         sys.exit(f"cc-estimate: unknown command {cmd!r}. Run `cc-estimate --help`.")
     return modules[cmd].main(rest)

@@ -105,6 +105,8 @@ def load(path, tz, cfg=None, profiles=None):
         off = off_dates(cfg or {}, r["author"])
         rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
+                         code_lines=r.get("code_lines", r["lines"]), issues=r.get("issues"),
+                         areas=(profiles.get(r["id"]) or {}).get("areas"),
                          kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r.get("code_lines", r["lines"])),
                          test_heavy=r.get("test_lines", 0) > TEST_HEAVY * r.get("code_lines", r["lines"]),
                          **profile_fields(profiles.get(r["id"]))))

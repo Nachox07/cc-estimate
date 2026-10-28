@@ -134,6 +134,57 @@ With a `classifier` in the config, `--paths` adds what the change will go throug
 which approval groups and test suites the paths trigger. That is context; it does not change the
 range.
 
+## Reading `advise`
+
+```text
+$ cc-estimate advise --plan sim/plan.jsonl
+History: 322 finished tasks (data up to 2024-02-12).
+Width of the 80% range by size, in work hours:
+  XS n=56  width 3.4
+  S  n=59  width 2.8  x0.8 vs the bucket below
+  M  n=56  width 4.3  x1.6 vs the bucket below
+  L  n=96  width 4.1  x0.9 vs the bucket below
+  XL n=55  width 13.0  x3.2 vs the bucket below
+Break point by size: XL.
+No area data in this history (pass --profiles from classify): the advice uses size only.
+Past splits: 12 past splits at or above XL took a median of 8.0 work hours in total, against 21.0 for single tasks of the same size.
+
+big (XL): Split. XL reaches the size break point (XL), where the 80% range gets much wider.
+  Slices, in dependency order. Ordered by the layer rule (matching path patterns): shared code, then services, then UI, then tests, then docs.
+  1. shared code: 2 file(s), size L: 4.9-9.0 work hours (0.5-1.0 working days), median 6.9 h, n=96
+  2. services: 2 file(s), size L: 4.9-9.0 work hours (0.5-1.0 working days), median 6.9 h, n=96
+  3. UI: 2 file(s), size L: 4.9-9.0 work hours (0.5-1.0 working days), median 6.9 h, n=96
+  4. tests: 1 file(s), size XS: 3.3-6.7 work hours (0.4-0.7 working days), median 4.3 h, n=56
+  5. docs: 1 file(s), size XS: 3.3-6.7 work hours (0.4-0.7 working days), median 4.3 h, n=56
+  Slice sizes assume product-code lines in proportion to code files; the tool cannot see lines per file.
+
+mid (L): Keep. L is below the break point XL.
+```
+
+Read it from the top. The table is the width of the 80% range for each size, with the ratio to the
+size below. The break point is the first size whose ratio is above 2.0: here XL, where the range is
+3.2 times as wide as at L. A task at that size or above is a candidate for splitting; the "Past
+splits" line says whether splitting has paid off in this history. A split is several tasks that
+close one parent issue; the line compares the total time of such sets with single tasks of the
+same combined size.
+
+The advice stops at No advice when:
+
+- no size has a ratio above 2.0 ("no size bucket has an 80% range more than twice as wide");
+- fewer than 20 finished tasks lie on either side of the break ("too thin");
+- past splits were not faster in total, or cannot be found (no parent issues, as in the git-only
+  source), so the claim cannot be checked.
+
+Slices are ordered by the layer rule: docs and tests are recognised first, then each path is matched
+against the layer patterns (`advise.layers` in the config, or the defaults), and the layers run
+shared code, services, other code, UI, tests, docs. Each slice's size is a share of the history's
+typical product-code lines for the task's size, in proportion to its code files. The tool sees file
+counts, not lines, so treat slice sizes as a guide. Areas are the first path segment unless the
+classifier's `area_depth` says otherwise; with `--profiles` from `classify` the break is also computed
+by number of areas, and without it the output says it used size only. A bucket with fewer than five
+tasks or three authors prints counts only. Merge needs no history: two XS or S tasks that touch the
+same area.
+
 ## Logging and scoring
 
 `estimate --log --issue 123` appends the range to `data/estimates.jsonl` with your login. After the
@@ -159,13 +210,16 @@ your own estimates.
   an exact number: in `size-matters` the size rows cover 70-90% and beat the baseline's Winkler score by
   at least 15%; in `null` they land within 5% of it; in `test-heavy` each test-heavy task is sized by its
   product code and flagged, and no other task is; in `thin` (27 S and 3 L tasks) `backtest` refuses and
-  `estimate` gives a size range for S and the size-blind range for L.
+  `estimate` gives a size range for S and the size-blind range for L. Five advisor scenarios check
+  `advise`: `break-point` (XL named as the break, only the XL task split, slices cover every file and
+  each is below the break), `no-break`, `slow-splits` and `thin-advisor` (each gives no advice, for its
+  own stated reason) and `merge-keep` (only the same-area pair merges).
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 24 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
-  probe is not failing everything. All 24 are caught.
+  probe is not failing everything. All are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
