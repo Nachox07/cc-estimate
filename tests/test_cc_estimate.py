@@ -799,6 +799,11 @@ class JiraSource(unittest.TestCase):
         self.assertEqual(by["DEMO-4"]["author"], "unassigned")
         self.assertNotIn("Not Used", json.dumps(rows))
 
+    def test_output_names_no_assignee(self):
+        _, printed, _, _ = self.run_cli(FakeJira([[DEMO1, DEMO2, DEMO4]]), cfg={"jira": {"users": {"acct-aaa": "alice"}}})
+        for who in ("acct-aaa", "alice", "Not Used"):
+            self.assertNotIn(who, printed)
+
     def test_blocked_statuses_come_from_the_config(self):
         rows, _, _, _ = self.run_cli(FakeJira([[DEMO1]]), cfg={"jira": {"blocked_statuses": ["Waiting"]}})
         self.assertEqual(rows[0]["excluded"], {})
