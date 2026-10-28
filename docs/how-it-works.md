@@ -12,7 +12,9 @@ python3 examples/sample_history.py data/sample.tasks.jsonl
 ## The pipeline
 
 1. **Build tasks.** One task is one piece of work: a tracker key in commit messages (`git-tasks`),
-   or the pull requests that close the same issue (`fetch`, `links`, `tasks`). Bots, release
+   the pull requests that close the same issue (`fetch`, `links`, `tasks`), or resolved Jira
+   issues read with their status history (`jira-tasks`: start at the first move to In Progress,
+   end at resolution, blocked statuses excluded, lines from commits naming the key). Bots, release
    branch cherry-picks and automation are dropped.
 2. **Measure cycle time in working hours.** From the first commit (or the PR opening, if earlier)
    to the last merge, counting only Monday to Friday, 09:00–18:00 in your timezone. Absence days
@@ -145,7 +147,7 @@ your own estimates.
   that always wins, or never does, fails one of the two.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 24 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
   probe is not failing everything. All 24 are caught.

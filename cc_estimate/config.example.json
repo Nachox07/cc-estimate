@@ -7,7 +7,10 @@
   "git": {
     "repo_dir": ".",
     "branch": "origin/main",
-    "key_regex": ["\\b([A-Z][A-Z0-9]+-\\d+)\\b", "(?<![\\w&])(#\\d+)\\b"],
+    "key_regex": [
+      "\\b([A-Z][A-Z0-9]+-\\d+)\\b",
+      "(?<![\\w&])(#\\d+)\\b"
+    ],
     "quiet_days": 5
   },
   "bot_login_patterns": [
@@ -77,5 +80,14 @@
     "cursor",
     "noreply@anthropic\\.com",
     "openai"
-  ]
+  ],
+  "jira": {
+    "users": {
+      "jira-account-id": "your-login"
+    },
+    "blocked_statuses": [
+      "Blocked",
+      "On Hold"
+    ]
+  }
 }

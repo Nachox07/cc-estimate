@@ -99,6 +99,17 @@ cc-estimate init                             # writes cc-estimate.json; set repo
 cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
 
+**From Jira Cloud** (resolved issues; needs `JIRA_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` in the environment):
+
+```bash
+cc-estimate jira-tasks --jql "project = ABC AND resolved >= -180d" --repo-dir . --config cc-estimate.json --out data/repo.tasks.jsonl
+```
+
+A task starts at the first move into an In Progress status and ends at resolution. Time in
+`jira.blocked_statuses` (default `Blocked`, `On Hold`) is excluded. Authors are account ids unless
+`jira.users` maps them to logins. Sizes come from commits that name the issue key, so pass
+`--repo-dir`; without it every `lines` is 0 and `estimate --size` cannot work from the file.
+
 **From GitHub** (pull requests and the issues they close):
 
 ```bash
@@ -156,7 +167,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small
 hand-made inputs, checks that no estimate can see the future, and runs generated histories where
 size matters and where it does not: size must win clearly in the first and must not win in the
-second, across five seeds. `python3 tests/mutation_probe.py` plants 24 known bugs one at a time and
+second, across five seeds. `python3 tests/mutation_probe.py` plants known bugs one at a time and
 confirms the suite catches every one. Details: [How it
 works](docs/how-it-works.md#how-it-is-tested).
 
