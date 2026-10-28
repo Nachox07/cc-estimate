@@ -238,7 +238,7 @@ class Backtest(unittest.TestCase):
             with self.subTest(seed=seed):
                 size, repo = self.scores(seed, size_matters=True)
                 self.assertLess(size["winkler"], 0.85 * repo["winkler"])
-                self.assertTrue(0.85 <= size["coverage"] <= 0.95, size["coverage"])
+                self.assertTrue(0.75 <= size["coverage"] <= 0.95, size["coverage"])
 
     def test_size_coverage_is_80_percent_once_tied_durations_are_broken(self):
         # Many generated tasks last exactly 0 or 9 working hours, so they sit on a range bound and

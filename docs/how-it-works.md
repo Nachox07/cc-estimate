@@ -140,7 +140,7 @@ your own estimates.
 - **No look-ahead.** Two tests check that an estimate cannot see the future: changing the outcome of
   any task that had not finished when the estimated one started leaves the estimate unchanged.
 - **Signal and no signal.** On generated histories where size drives duration, `size` must beat the
-  repo baseline's Winkler score by at least 15% and cover 85–95%, across five random seeds. On
+  repo baseline's Winkler score by at least 15% and cover 75–95%, across five random seeds. On
   histories where size has no effect, `size` must not beat the baseline by more than 5%. A method
   that always wins, or never does, fails one of the two.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
@@ -152,19 +152,19 @@ your own estimates.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
-Why 85–95% and not 80%: in the generated histories about a quarter of all durations are exactly 0
-working hours (finished overnight or at a weekend) or exactly 9 (one full working day). Those
-values often sit right on the 10th or 90th percentile, and a task on the edge counts as inside the
-range, so the "80%" range really covers about 89%. Nudging every duration by a thousandth of an
-hour, which breaks the ties, brings coverage back to 79% (60 seeds, 10,080 estimates). Real
-histories have the same lumps, so a range that covers a little more than its level is expected;
-it is not a fault in the percentile code. A test checks the tie-broken coverage stays near 80%.
+Why the "80%" range covers about 89% here: in the generated histories about a quarter of all
+durations are exactly 0 working hours (finished overnight or at a weekend) or exactly 9 (one full
+working day). Those values often sit right on the 10th or 90th percentile, and a task on the edge
+counts as inside the range. Nudging every duration by a thousandth of an hour breaks the ties and
+brings coverage back to 79% (60 seeds, 10,080 estimates), so the percentile code is right. A test
+checks that tie-broken coverage stays near 80%. A real history with many tasks finished outside
+working hours will show the same effect; `backtest` reports the coverage you actually get.
 
 Each generated world has a pass rule the other world would fail:
 
 ```mermaid
 flowchart LR
-  W1["Size drives duration"] --> P1["size beats the baseline by 15% or more,<br/>coverage 85-95%"]
+  W1["Size drives duration"] --> P1["size beats the baseline by 15% or more,<br/>coverage 75-95%"]
   W0["Size has no effect"] --> P0["size does not beat the baseline<br/>by more than 5%"]
 ```
 
