@@ -9,6 +9,8 @@ Every output below comes from a made-up history of 300 tasks by three people. Re
 python3 examples/sample_history.py data/sample.tasks.jsonl
 ```
 
+For a run on real history, see the [pandas case study](case-studies/pandas-dev-pandas.md).
+
 ## The pipeline
 
 1. **Build tasks.** One task is one piece of work: a tracker key in commit messages (`git-tasks`),
