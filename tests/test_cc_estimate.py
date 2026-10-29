@@ -284,6 +284,20 @@ class Backtest(unittest.TestCase):
                 self.assertLess(size["winkler"], 0.85 * repo["winkler"])
                 self.assertTrue(0.75 <= size["coverage"] <= 0.95, size["coverage"])
 
+    def test_size_coverage_is_80_percent_once_tied_durations_are_broken(self):
+        # Many generated tasks last exactly 0 or 9 working hours, so they sit on a range bound and
+        # count as inside. A tiny random nudge to each duration undoes that and leaves the true level.
+        rnd, hit, n = random.Random(1), 0, 0
+        for seed in range(7, 12):
+            with tempfile.TemporaryDirectory() as tmp:
+                d = write(tmp, *synthetic(seed=seed), {"timezone": "Europe/Madrid"})
+                rows = bt.load(str(d / "tasks.jsonl"), MAD, {})
+            for r in rows:
+                r["y"] += rnd.uniform(0, 1e-3)
+            o = bt.run(rows, list(range(200, len(rows))), "size", 10, 0.1, 0.9)
+            hit, n = hit + sum(x["inside"] for x in o), n + len(o)
+        self.assertTrue(0.76 <= hit / n <= 0.86, hit / n)
+
     def test_size_does_not_win_when_size_has_no_effect(self):
         for seed in range(7, 12):
             with self.subTest(seed=seed):

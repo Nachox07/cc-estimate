@@ -156,6 +156,14 @@ your own estimates.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
+Why the "80%" range covers about 89% here: in the generated histories about a quarter of all
+durations are exactly 0 working hours (finished overnight or at a weekend) or exactly 9 (one full
+working day). Those values often sit right on the 10th or 90th percentile, and a task on the edge
+counts as inside the range. Nudging every duration by a thousandth of an hour breaks the ties and
+brings coverage back to 79% (60 seeds, 10,080 estimates), so the percentile code is right. A test
+checks that tie-broken coverage stays near 80%. A real history with many tasks finished outside
+working hours will show the same effect; `backtest` reports the coverage you actually get.
+
 Each generated world has a pass rule the other world would fail:
 
 ```mermaid
