@@ -41,7 +41,7 @@ gantt
 A task file is one JSON object per line:
 
 ```json
-{"id": "DEMO-2", "title": "feat: add", "author": "carol", "labels": [], "start": "2026-01-06T10:00:00+00:00", "end": "2026-01-14T14:17:18+00:00", "lines": 2803, "excluded": {}}
+{"id": "DEMO-2", "title": "chore: tidy", "author": "carol", "labels": [], "start": "2026-01-05T17:00:00+00:00", "end": "2026-01-09T23:38:43.571697+00:00", "lines": 3028, "code_lines": 1556, "test_lines": 1472, "doc_lines": 0, "excluded": {}}
 ```
 
 ## Reading `backtest`
@@ -68,31 +68,35 @@ The tasks are then split in three, in time order:
 
 ```mermaid
 flowchart LR
-  H["Tasks 0-149<br/>history only"] --> T["Tasks 150-269<br/>tune: compare methods, pick one"] --> L["Tasks 270-299<br/>locked: read once, after picking"]
+  H["Tasks 0-138<br/>history only"] --> T["Tasks 139-249<br/>tune: compare methods, pick one"] --> L["Tasks 250-277<br/>locked: read once, after picking"]
 ```
 
 ```text
-tasks: 300  tune: [150,270)  locked: [270,300)  level=0.8  locked from 2026-05-27
-  XS n=  63  business hours p10=   0.0 p50=   9.0 p90=  18.0
-  S  n=  57  business hours p10=   3.5 p50=  11.8 p90=  20.4
-  M  n=  46  business hours p10=   9.0 p50=  19.0 p90=  32.0
-  L  n=  70  business hours p10=  24.5 p50=  45.0 p90=  68.4
-  XL n=  64  business hours p10=  70.9 p50= 115.0 p90= 173.8
+dropped 22 tasks starting after 2026-06-04 (right-censoring)
+tasks with blocked or absence time removed: 0
+test-heavy tasks (tests over 3x product code): 38
+tasks: 278  tune: [139,250)  locked: [250,278)  level=0.8  locked from 2026-05-19
+  XS n=  55  business hours p10=   0.0 p50=   9.0 p90=  18.0
+  S  n=  56  business hours p10=   2.5 p50=   9.0 p90=  18.8
+  M  n=  58  business hours p10=   6.6 p50=  18.0 p90=  27.0
+  L  n=  56  business hours p10=  20.3 p50=  45.0 p90=  70.4
+  XL n=  53  business hours p10=  63.0 p50=  97.0 p90= 134.2
 ```
 
-The first 150 tasks are history only. Tasks 150–269 are the **tune** slice, where you may compare
-and pick methods. The last 30 are **locked**: look at them once, after choosing. The size table
-shows the spread inside each size (size is changed lines: XS under 50, S under 300, M under 1,500,
-L under 5,000). A size with fewer than five tasks, or fewer than three people, shows only its count.
+The first 139 tasks are history only. Tasks 139–249 are the **tune** slice, where you may compare
+and pick methods. The last 28 are **locked**: look at them once, after choosing. The size table
+shows the spread inside each size (size is changed product-code lines, tests and docs not counted:
+XS under 50, S under 300, M under 1,500, L under 5,000). The test-heavy count is the tasks whose test
+lines exceed three times their product-code lines; they are sized by their code, not their tests. A size with fewer than five tasks, or fewer than three people, shows only its count.
 
 ```text
 == LOCKED · all tasks ==
   method                         n  cover  width_h medAE_h  winkler fallbk
-  baseline: repo                30   0.73    101.9    18.0    181.0   0.00
-  baseline: trailing 30d        30   0.80    134.1    18.0    155.3   0.00
-  baseline: same author         30   0.73    101.2    17.9    162.4   0.00
-  size                          30   0.83     47.7     9.0     85.2   0.00
-  size+kind                     30   0.73     44.2     8.5     90.8   0.00
+  baseline: repo                28   0.86     87.6    10.0    130.3   0.00
+  baseline: trailing 30d        28   0.82     94.7    12.5    132.4   0.00
+  baseline: same author         28   0.86     95.0    12.3    121.2   0.00
+  size                          28   0.89     20.7     7.0     48.1   0.00
+  size+kind                     28   0.71     21.2     8.0     57.7   0.00
 ```
 
 - **cover**: how often the real duration landed inside the range. Aim for about 0.80.
@@ -102,7 +106,7 @@ L under 5,000). A size with fewer than five tasks, or fewer than three people, s
   "narrow and right"; lower is better.
 - **fallbk**: how often a method had too few matching tasks and fell back to a simpler one.
 
-Here `size` halves the Winkler score of every baseline at about the same coverage, so on this
+Here `size` cuts the Winkler score of every baseline by more than half at similar coverage, so on this
 history the size is worth giving. On your history it may not be; the table tells you. Methods
 that need `classify` output (approvals, test suites) only appear when you pass `--profiles`.
 
@@ -110,12 +114,12 @@ that need `classify` output (approvals, test suites) only appear when you pass `
 
 ```text
 $ cc-estimate estimate --size L --text "add CSV export"
-Size L: 70 finished tasks in history (data up to 2026-07-09).
-80% range: 24.5-68.4 work hours (2.7-7.6 working days), median 45.0 h (5.0 d).
-Without a size: 6.0-118.5 h.
+Size L: 56 finished tasks in history (data up to 2026-06-25).
+80% range: 20.3-70.4 work hours (2.3-7.8 working days), median 45.0 h (5.0 d).
+Without a size: 4.8-94.8 h.
 ```
 
-Read it as: eight in ten L tasks here finished in 2.7 to 7.6 working days. "Without a size" is the
+Read it as: eight in ten L tasks here finished in 2.3 to 7.8 working days. "Without a size" is the
 range for any task; the gap between the two lines is what the size buys you. When a size has fewer
 than five finished tasks, `estimate` says "Not enough history for size L" and prints only the
 size-blind range. Tasks that started in the last 21 days are left out, because only the quick
@@ -145,10 +149,10 @@ your own estimates.
   that always wins, or never does, fails one of the two.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 24 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants 28 known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
-  probe is not failing everything. All 24 are caught.
+  probe is not failing everything. All 28 are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
@@ -177,5 +181,6 @@ flowchart LR
   start. Logged estimates measure how well you really name sizes.
 - In a squash-merged history without merge commits, a git-only task ends at its last commit, which
   leaves out the wait for review.
-- Size counts all changed lines, tests included. Splitting product code from tests is planned
-  (see `docs/superpowers/specs/`).
+- Size counts product-code lines only. Tests and docs are carried beside it; a task with tests over
+  3x its code is flagged test-heavy. Task files from before this split have no `code_lines`; they
+  load, sized by total lines, with a note on stderr.

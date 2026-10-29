@@ -6,6 +6,7 @@
   cc-estimate score                              # fill actuals from GitHub, print the running score
 
 The range is the p10-p90 of work hours (minus absence and blocked time) for finished tasks of the same size bucket
+(product-code lines; tests and docs are not counted)
 (the only signal that held up in backtest.py). Each logged estimate also stores the
 size-blind repo range, so `score` can say whether the planned size helped.
 Only the current gh user's estimates are logged or scored.
@@ -256,7 +257,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="cc-estimate")
     sp = ap.add_subparsers(dest="cmd", required=True)
     e = sp.add_parser("estimate", parents=[common])
-    e.add_argument("--size", required=True, choices=[name for _, name in bt.BUCKETS])
+    e.add_argument("--size", required=True, choices=[name for _, name in bt.BUCKETS],
+                   help="product-code lines (tests and docs not counted): XS <50, S <300, M <1,500, L <5,000, XL")
     e.add_argument("--issue", help="issue number or tracker key (ABC-123)"); e.add_argument("--text")
     e.add_argument("--log", action="store_true")
     e.add_argument("--paths", nargs="*", help="files or directories you expect to change")

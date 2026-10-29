@@ -101,7 +101,8 @@ def task_rows(n, lines=100, every_h=24, start=datetime(2026, 6, 1, 9, tzinfo=UTC
     for i in range(n):
         s = start + timedelta(hours=i * every_h)
         out.append(dict(id=i + 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
-                        end=(s + timedelta(hours=4 + 3 * (i % 5))).isoformat(), lines=lines, excluded={}))
+                        end=(s + timedelta(hours=4 + 3 * (i % 5))).isoformat(), lines=lines, code_lines=lines,
+                        test_lines=0, doc_lines=0, excluded={}))
     return out
 
 
@@ -198,6 +199,49 @@ class Scoring(unittest.TestCase):
                     mock.patch.object(estimate, "me", return_value="alice"):
                 estimate.main(["score", "--config", str(d / "cfg.json")])
         self.assertIn("1 logged, 0 finished", buf.getvalue())
+
+
+class SizeByCode(unittest.TestCase):
+    def load(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp, "t.jsonl"), rows)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                out = bt.load(str(Path(tmp, "t.jsonl")), UTC)
+        return out, err.getvalue()
+
+    def row(self, code, tests=0, docs=0, **kw):
+        return {**task_rows(1)[0], "lines": code + tests + docs, "code_lines": code, "test_lines": tests, "doc_lines": docs, **kw}
+
+    def test_size_comes_from_code_lines_not_the_total(self):
+        rows, _ = self.load([self.row(100, tests=4000, docs=900)])
+        self.assertEqual(rows[0]["size"], "S")
+
+    def test_a_task_with_five_times_its_code_in_tests_keeps_its_code_size_and_is_flagged(self):
+        rows, _ = self.load([self.row(1000, tests=5000), self.row(1000, tests=900, id=2), self.row(1000, tests=3000, id=3)])
+        self.assertEqual([r["size"] for r in rows], ["M", "M", "M"])
+        self.assertEqual([r["test_heavy"] for r in rows], [True, False, False])  # exactly 3x is not heavy
+
+    def test_a_file_without_the_new_fields_loads_by_total_lines_and_says_so_once(self):
+        strip = lambda r: {k: v for k, v in r.items() if k not in ("code_lines", "test_lines", "doc_lines")}
+        old = [strip(r) for r in task_rows(2, lines=700)]
+        rows, err = self.load(old)
+        self.assertEqual([r["size"] for r in rows], ["M", "M"])
+        self.assertFalse(any(r["test_heavy"] for r in rows))
+        self.assertEqual(err.count("code_lines"), 1)
+
+    def test_a_current_file_prints_no_note(self):
+        self.assertEqual(self.load([self.row(100)])[1], "")
+
+    def test_tasks_carry_the_pr_split_and_keep_lines_as_the_total(self):
+        prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at="2026-10-05T12:00:00Z", first_commit_at=None,
+                    size={"lines": {"code": c, "tests": t, "docs": d, "ignored": 999}}, review={"rounds": 0})
+               for n, (c, t, d) in [(1, (10, 20, 3)), (2, (5, 1, 0))]]
+        lks = [dict(number=n, base="main", closing=[{"number": 50, "excluded": {}}], excluded={}) for n in (1, 2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            row = json.loads((write(tmp, prs, lks, {}) / "tasks.jsonl").read_text())
+        self.assertEqual((row["code_lines"], row["test_lines"], row["doc_lines"], row["lines"]), (15, 21, 3, 39))
 
 
 class Backtest(unittest.TestCase):
@@ -397,6 +441,20 @@ class GitSource(unittest.TestCase):
             subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env=e)
         git("init", "-q", "-b", "main")
         return git
+
+    def test_git_tasks_split_lines_by_path_class_and_leave_out_ignored_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d)
+            for path, n in [("src/app.py", 4), ("tests/test_app.py", 9), ("docs/guide.md", 2), ("uv.lock", 50)]:
+                Path(d, path).parent.mkdir(exist_ok=True)
+                Path(d, path).write_text("x\n" * n)
+            git("add", "."); git("commit", "-qm", "ABC-1 work", when="2026-10-05T09:00:00+00:00")
+            rows, _ = gitsource.build(gitsource.commits(d, "main", "2020-01-01"), gitsource.key_patterns(None))
+        self.assertEqual((rows[0]["code_lines"], rows[0]["test_lines"], rows[0]["doc_lines"], rows[0]["lines"]), (4, 9, 2, 15))
+
+    def test_a_renamed_file_is_classified_by_its_new_path(self):
+        self.assertEqual(gitsource.new_path("src/{old => tests}/a.py"), "src/tests/a.py")
+        self.assertEqual(gitsource.new_path("a.py => tests/a.py"), "tests/a.py")
 
     def test_a_merged_branch_ends_at_its_merge_commit(self):
         with tempfile.TemporaryDirectory() as d:
