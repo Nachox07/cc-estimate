@@ -37,6 +37,8 @@ M = [
  ("tasks.py", 'end=max(prs[n]["merged_at"] for n in ns)', 'end=min(prs[n]["merged_at"] for n in ns)', "task ends at first PR merge, not last"),
  ("tasks.py", 'groups[("issue", closing[0]) if closing else ("pr", n)].append(n)', 'groups[("pr", n)].append(n)', "PRs closing one issue not grouped"),
  ("history.py", 'return len(rs) >= MIN_CELL and len({r.get("author") for r in rs}) >= MIN_AUTHORS', 'return True', "summary shows small groups"),
+ ("backtest.py", 'same += any(at <= ready and w in who for w, at in p["reviewers"].items())', 'same += any(w in who for w, at in p["reviewers"].items())', "queue counts reviewer requests made after ready"),
+ ("estimate.py", 'for p in pool if p["ready"] and not p["merged"]]', 'for p in pool if False]', "wait range drops the PRs still open"),
  ("files.py", 'def open_out', '# control\ndef open_out', "control: no behaviour change (must survive)"),
 ]
 rows = []
