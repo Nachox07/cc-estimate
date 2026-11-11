@@ -8,7 +8,7 @@ Each task is estimated at its start using only tasks already finished by then.
 As-of inputs: title kind, epic label, author. `size` rows assume a perfect planner who
 names the final size bucket in advance, so they are an upper bound for what a planned size buys.
 """
-import argparse, json, statistics as st
+import argparse, json, sys, statistics as st
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -63,6 +63,9 @@ def epic(labels):
     return next((l for l in labels if l.startswith("epic:")), None)
 
 
+TEST_HEAVY = 3  # tests beyond this multiple of product code mark a task test-heavy
+
+
 def bucket(lines):
     return next(name for limit, name in BUCKETS if lines < limit)
 
@@ -94,15 +97,20 @@ def profile_fields(p):
 
 def load(path, tz, cfg=None, profiles=None):
     profiles = profiles or {}
-    rows = []
+    rows, old = [], 0
     for r in map(json.loads, Path(path).read_text().splitlines()):
+        old += "code_lines" not in r
         start, end = parse(r["start"]), parse(r["end"])
         blocked = [[parse(x), parse(y)] for spans in (r.get("excluded") or {}).values() for x, y in spans]
         off = off_dates(cfg or {}, r["author"])
         rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
-                         kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r["lines"]),
+                         kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r.get("code_lines", r["lines"])),
+                         test_heavy=r.get("test_lines", 0) > TEST_HEAVY * r.get("code_lines", r["lines"]),
                          **profile_fields(profiles.get(r["id"]))))
+    if old:
+        print(f"{old} tasks have no code_lines; sized by total lines. Rebuild the tasks file to size by product code.",
+              file=sys.stderr)
     rows.sort(key=lambda x: x["start"])
     add_load(rows)
     return rows
@@ -273,6 +281,7 @@ def main(argv=None):
     print(f"dropped {dropped} tasks starting after {cut:%Y-%m-%d} (right-censoring)")
     nb = sum(r["y"] < r["y_raw"] - 0.01 for r in rows)
     print(f"tasks with blocked or absence time removed: {nb}")
+    print(f"test-heavy tasks (tests over {TEST_HEAVY}x product code): {sum(r['test_heavy'] for r in rows)}")
     print(f"tasks: {n}  tune: [{first},{lock})  locked: [{lock},{n})  level={a.level}  locked from {rows[lock]['start']:%Y-%m-%d}")
     for size in ("XS", "S", "M", "L", "XL"):
         ys = [r["y"] for r in rows if r["size"] == size]

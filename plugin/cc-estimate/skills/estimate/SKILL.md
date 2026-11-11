@@ -14,9 +14,9 @@ The skill runs the `cc-estimate` command. If it is not installed: `pipx install 
 
 ## Steps
 
-1. **Size.** Ask for XS/S/M/L/XL, or propose one and confirm. Buckets are changed lines including
-   tests and docs: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. Agent-written work often carries
-   several times its product lines in tests; count them.
+1. **Size.** Ask for XS/S/M/L/XL, or propose one and confirm. Buckets are changed lines of product
+   code, tests and docs not counted: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. Agent-written work
+   often carries several times its product lines in tests; leave those out of the size.
 2. **Estimate and log:** `cc-estimate estimate --size <S> --issue <KEY> --log`.
    - Add `--paths` with the files or directories the change will touch, to list the approvals and
      test suites it triggers.

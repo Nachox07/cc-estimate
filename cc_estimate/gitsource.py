@@ -10,6 +10,7 @@ import argparse, json, re, subprocess, sys
 from datetime import datetime
 from collections import defaultdict
 from .files import open_out
+from .history import classify_path, compile_cfg, load_config
 
 # Tried in order, so a tracker key beats the "(#123)" a squash merge appends.
 DEFAULT_KEYS = [r"\b([A-Z][A-Z0-9]+-\d+)\b", r"(?<![\w&])(#\d+)\b"]
@@ -17,7 +18,25 @@ REC, UNIT = "\x1e", "\x1f"
 MERGE_PR = re.compile(r"^Merge pull request #\d+")  # the PR's own number, not the task key
 
 
-def commits(repo_dir, branch, since):
+def new_path(p):
+    """numstat writes a rename as `a => b` or `dir/{a => b}/f`; classify the new name."""
+    p = re.sub(r"\{[^{}]* => ([^{}]*)\}", r"\1", p) if "{" in p else p.split(" => ")[-1]
+    return p.replace("//", "/")
+
+
+def split_lines(numstat, cfg, cc):
+    """Changed lines of one commit by class; ignored files (lockfiles, snapshots) count nowhere."""
+    out = dict(code=0, tests=0, docs=0)
+    for a, b, path in numstat:
+        kind = classify_path(new_path(path), cc, cfg)
+        if a != "-" and kind != "ignored":
+            out[kind] += int(a) + int(b)
+    return out
+
+
+def commits(repo_dir, branch, since, cfg=None):
+    cfg = cfg or load_config(None)
+    cc = compile_cfg(cfg)
     fmt = UNIT.join(["%H", "%ae", "%aI", "%s", "%b"]) + REC
     out = subprocess.run(["git", "-C", repo_dir, "log", branch, "--no-merges", f"--since={since}",
                           f"--format={fmt}", "--numstat"], capture_output=True, text=True, check=True).stdout
@@ -28,14 +47,14 @@ def commits(repo_dir, branch, since):
         lines = chunk.strip("\n").split("\n")
         if i > 0:  # leading numstat lines belong to the previous commit
             head = [l for l in lines if re.match(r"^(\d+|-)\t(\d+|-)\t", l)]
-            stats.append(sum(int(a) + int(b) for a, b, _ in (l.split("\t", 2) for l in head) if a != "-"))
+            stats.append(split_lines([l.split("\t", 2) for l in head], cfg, cc))
             lines = [l for l in lines if l not in head]
         rest = "\n".join(lines).strip("\n")
         if rest:
             sha, email, date, subject, body = (rest.split(UNIT) + [""] * 5)[:5]
             parsed.append(dict(sha=sha, author=email, at=date, subject=subject, body=body))
     for c, n in zip(parsed, stats):
-        c["lines"] = n
+        c.update(code=n["code"], tests=n["tests"], docs=n["docs"], lines=sum(n.values()))
     return parsed
 
 
@@ -94,7 +113,8 @@ def build(cs, patterns, ignore_re=None, merged=()):
         end = min(after, key=when) if after else last
         rows.append(dict(id=key, title=cl[0]["subject"], author=max(authors, key=authors.get), labels=[],
                          start=cl[0]["at"], end=end, end_kind="merge" if after else "commit",
-                         lines=sum(c.get("lines", 0) for c in cl), commits=len(cl), excluded={}))
+                         lines=sum(c.get("lines", 0) for c in cl), code_lines=sum(c.get("code", 0) for c in cl),
+                         test_lines=sum(c.get("tests", 0) for c in cl), doc_lines=sum(c.get("docs", 0) for c in cl), commits=len(cl), excluded={}))
     rows.sort(key=lambda r: when(r["start"]))
     return rows, skipped
 
@@ -110,8 +130,8 @@ def main(argv=None):
     ap.add_argument("--config", help="cc-estimate.json; its git.key_regex is used when --key-regex is not given")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    cfg = json.loads(open(a.config).read()) if a.config else {}
-    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex")),
+    cfg = load_config(a.config)
+    rows, skipped = build(commits(a.repo_dir, a.branch, a.since, cfg), key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex")),
                           re.compile(a.ignore_authors) if a.ignore_authors else None,
                           merged=merges(a.repo_dir, a.branch, a.since))
     with open_out(a.out) as f:

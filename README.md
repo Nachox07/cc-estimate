@@ -9,7 +9,7 @@ git, GitHub, or any tracker whose keys appear in commit messages (Jira, Linear, 
 ships as a CLI plus a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill.
 
 New here? [How it works](docs/how-it-works.md) walks through each command's output on a sample
-history, and how the tool is tested.
+history, and how the tool is tested. A run on a large public repository: [pandas case study](docs/case-studies/pandas-dev-pandas.md).
 
 ## Why
 
@@ -37,7 +37,7 @@ flowchart LR
 ```
 
 **1. A task is a unit of delivered work.** That's the commits sharing a tracker key (`ABC-123` or `#123`), or
-the pull requests closing the same issue.
+the pull requests closing the same issue. A pull request that closes no issue is a task of its own.
 
 **2. Its cycle time counts working hours only.** The clock runs from the first commit (or the
 PR opening, if that came first) to the last merge. With the git-only source the end is the merge commit that landed the work when the history has
@@ -50,9 +50,9 @@ tracker keys, the `(#123)` suffix is the pull request number, so each pull reque
 - **retired process steps**: if you removed a gate (say, a manual QA queue), list its labels and
   history stops charging tasks for it.
 
-**3. An estimate is a range, not a number.** You choose a size bucket, measured in changed lines
-including tests: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. You get the 10th–90th percentile
-of cycle time for finished tasks of that size: an 80% interval, in working days.
+**3. An estimate is a range, not a number.** You choose a size bucket, measured in changed lines of
+product code, tests and docs not counted: XS <50, S <300, M <1,500, L <5,000, XL ≥5,000. You get
+the 10th–90th percentile of cycle time for finished tasks of that size: an 80% interval, in working days.
 
 **4. You can see what the work will need.** Pass the paths you expect to change. If your repo
 encodes ownership or test selection in machine-readable files (a CODEOWNERS-style path list, a
@@ -90,7 +90,7 @@ Requires Python 3.10+. No dependencies. The GitHub source also needs an authenti
 
 ```bash
 pip install git+https://github.com/Nachox07/cc-estimate
-cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone
+cc-estimate init                             # writes cc-estimate.json; set repo, source, timezone, and clear the placeholder bot and absence entries
 ```
 
 **From git only** (Jira, Linear or any key in commit messages; set `"source": "git"`):
@@ -147,7 +147,9 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 | `title`, `labels` | as known when the task started |
 | `author` | who delivered it; used only for that person's own estimates |
 | `start`, `end` | ISO-8601: first commit; last merge (or last commit, see above) |
-| `lines` | changed lines, tests and docs included |
+| `code_lines` | changed product-code lines; the size bucket comes from this |
+| `test_lines`, `doc_lines` | changed lines in tests and in docs, by the config's `tests_patterns` and `docs_patterns`; tests over 3x `code_lines` make a task test-heavy |
+| `lines` | all three added up. Files without `code_lines` still load, sized by `lines` |
 | `excluded` | `{"blocked": [[start, end], …], …}`: non-working periods |
 
 A new source is any script that writes those rows: a Jira or Linear API export, Azure DevOps,

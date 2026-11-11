@@ -45,6 +45,7 @@ def main(argv=None):
             issues = sorted({i["number"] for n in ns for i in links.get(n, {}).get("closing", [])})
             assigned = [i["first_assigned_at"] for n in ns for i in links.get(n, {}).get("closing", []) if i.get("first_assigned_at")]
             sz = [prs[n]["size"]["lines"] for n in ns]
+            code, tests, docs = (sum(s[k] for s in sz) for k in ("code", "tests", "docs"))
             excluded = defaultdict(list)  # label group -> spans, from the PRs and their closing issues
             for n in ns:
                 l = links.get(n, {})
@@ -55,7 +56,7 @@ def main(argv=None):
                 id=ns[0], prs=ns, issues=issues, author=first["author"], title=first["title"],
                 labels=first["labels"], start=min(starts, key=lambda s: s.replace("Z", "+00:00")),
                 end=max(prs[n]["merged_at"] for n in ns), issue_first_assigned_at=min(assigned) if assigned else None,
-                lines=sum(s["code"] + s["tests"] + s["docs"] for s in sz),
+                lines=code + tests + docs, code_lines=code, test_lines=tests, doc_lines=docs,
                 excluded=excluded,
                 review_rounds=sum(prs[n]["review"]["rounds"] for n in ns),
             )) + "\n")
