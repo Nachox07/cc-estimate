@@ -81,6 +81,10 @@ will trigger. This is context; it doesn't change the number.
   summary line counts these as dropped on the left) and records the resolved `--since` beside the
   tasks file (`<file>.meta.json`), which `backtest` and `estimate` then use as the window start.
   A key reused from long ago (an old "refs #123") drops today's task with it.
+- On GitHub, `links` records each closing issue's earliest merged closing PR from this repo, and
+  `tasks` drops a task whose issue had a PR merged before the fetch `--since` (its first PR is not in
+  the data, so it would start late). `links` and `tasks` save the fetch `--since` (as midnight UTC)
+  beside their output, the same way `git-tasks` does. Links files fetched before this need re-fetching.
 
 The `size` rows assume you name the final size before you start, so they are a best case. Logged
 estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40

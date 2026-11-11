@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import os, subprocess
 
 from cc_estimate import backtest as bt, estimate, gitsource, links, spans, tasks
-from cc_estimate.files import read_since
+from cc_estimate.files import read_since, write_since
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -140,6 +140,28 @@ class Tasks(unittest.TestCase):
             rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
         self.assertEqual([r["prs"] for r in rows], [[1, 2]])
 
+    def test_a_task_whose_issue_had_a_pr_merged_before_the_fetch_is_dropped(self):
+        prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at="2026-10-06T12:00:00Z", first_commit_at=None, size={"lines": {"code": 1, "tests": 0, "docs": 0}},
+                    review={"rounds": 0}) for n in (1, 2)]
+        lks = [dict(number=1, base="main", excluded={}, closing=[{"number": 50, "excluded": {}, "earliest_pr_merged_at": "2026-09-20T10:00:00Z"}]),
+               dict(number=2, base="main", excluded={}, closing=[{"number": 51, "excluded": {}, "earliest_pr_merged_at": "2026-10-06T12:00:00Z"}])]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "prs.jsonl").write_text("".join(json.dumps(p) + "\n" for p in prs))
+            (d / "links.jsonl").write_text("".join(json.dumps(l) + "\n" for l in lks))
+            write_since(d / "links.jsonl", datetime(2026, 10, 1, tzinfo=UTC))
+            (d / "cfg.json").write_text("{}")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                tasks.main(["--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"), "--config", str(d / "cfg.json"),
+                            "--out", str(d / "tasks.jsonl")])
+            rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
+            since = read_since(d / "tasks.jsonl")
+        self.assertEqual([r["prs"] for r in rows], [[2]])
+        self.assertIn("1 dropped on the left", out.getvalue())
+        self.assertEqual(since, datetime(2026, 10, 1, tzinfo=UTC))
+
     def test_a_task_ends_when_its_last_pr_merges(self):
         prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
                     merged_at=m, first_commit_at=None, size={"lines": {"code": 10, "tests": 0, "docs": 0}}, review={"rounds": 0})
@@ -163,6 +185,27 @@ class Tasks(unittest.TestCase):
 
 
 class Links(unittest.TestCase):
+    def issue_node(self, prs):
+        return dict(number=50, createdAt="2026-08-01T09:00:00Z", title="t", closedAt=None, labels={"nodes": []},
+                    closedByPullRequestsReferences={"nodes": prs}, timelineItems={"nodes": []}, labelEvents={"nodes": []})
+
+    def pr_node(self, closing):
+        return dict(number=9, baseRefName="main", headRefName="x", title="fix: y", body="", mergedAt="2026-10-06T16:00:00Z",
+                    closingIssuesReferences={"nodes": [closing]}, labelEvents={"nodes": []})
+
+    def test_an_issue_records_its_earliest_merged_closing_pr_from_this_repo(self):
+        node = self.pr_node(self.issue_node([
+            dict(number=3, mergedAt="2026-09-20T10:00:00Z", repository={"nameWithOwner": "acme/widgets"}),
+            dict(number=2, mergedAt="2026-09-10T10:00:00Z", repository={"nameWithOwner": "other/repo"}),
+            dict(number=4, mergedAt=None, repository={"nameWithOwner": "acme/widgets"}),
+            dict(number=9, mergedAt="2026-10-06T16:00:00Z", repository={"nameWithOwner": "acme/widgets"})]))
+        rec = links.record(node, {}, "main", "acme/widgets")
+        self.assertEqual(rec["closing"][0]["earliest_pr_merged_at"], "2026-09-20T10:00:00Z")
+
+    def test_an_issue_with_no_merged_closing_pr_records_none(self):
+        rec = links.record(self.pr_node(self.issue_node([])), {}, "main", "acme/widgets")
+        self.assertIsNone(rec["closing"][0]["earliest_pr_merged_at"])
+
     def test_squash_suffix_is_a_cherry_pick_only_off_the_default_branch(self):
         n = dict(number=9, baseRefName="trunk", headRefName="x", title="fix: y (#3)", body="", mergedAt="2026-10-06T16:00:00Z")
         self.assertIsNone(links.record(n, {}, "trunk")["cherry_pick_of"])

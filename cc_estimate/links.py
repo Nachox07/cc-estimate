@@ -5,15 +5,16 @@ issue carried a label whose time is not work time (config `excluded_labels`, e.g
 waiting for a review gate that no longer exists). Stdlib + gh."""
 import argparse, json, re, sys
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from . import history as h
-from .files import open_out
+from .files import open_out, write_since
 
 LABEL_EVENTS = """labelEvents: timelineItems(first: 50, itemTypes: [LABELED_EVENT, UNLABELED_EVENT]) { nodes {
   __typename ... on LabeledEvent { createdAt label { name } } ... on UnlabeledEvent { createdAt label { name } } } }"""
 FIELDS = """number baseRefName headRefName title body createdAt mergedAt author { login } %s
 closingIssuesReferences(first: 10) { nodes { number createdAt title closedAt
+  closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { nodes { number mergedAt repository { nameWithOwner } } }
   labels(first: 30) { nodes { name } } %s
   timelineItems(first: 10, itemTypes: [ASSIGNED_EVENT]) { nodes { ... on AssignedEvent { createdAt } } } } }""" % (LABEL_EVENTS, LABEL_EVENTS)
 DEFAULT_EXCLUDED = {"blocked": ["blocked"]}
@@ -74,12 +75,15 @@ def blocked_spans(events, close_at):
     return label_spans(events, close_at, set(DEFAULT_EXCLUDED["blocked"]))
 
 
-def record(n, groups, branch="main"):
+def record(n, groups, branch="main", repo=None):
     body = n.get("body") or ""
     closing = []
     for i in (n.get("closingIssuesReferences") or {}).get("nodes") or []:
         assigned = [t["createdAt"] for t in (i.get("timelineItems") or {}).get("nodes") or [] if t]
+        merged = [p["mergedAt"] for p in (i.get("closedByPullRequestsReferences") or {}).get("nodes") or []
+                  if p and p.get("mergedAt") and (repo is None or (p.get("repository") or {}).get("nameWithOwner") == repo)]
         closing.append(dict(number=i["number"], created_at=i["createdAt"], title=i["title"],
+                            earliest_pr_merged_at=min(merged, key=lambda t: t.replace("Z", "+00:00")) if merged else None,
                             labels=[l["name"] for l in i["labels"]["nodes"]],
                             first_assigned_at=min(assigned) if assigned else None,
                             excluded=excluded_spans(i.get("labelEvents"), i.get("closedAt") or n["mergedAt"], groups)))
@@ -108,10 +112,11 @@ def main(argv=None):
         d = e + timedelta(days=1)
     seen = {}
     for n in rows:
-        seen[n["number"]] = record(n, groups, cfg.get("default_branch", "main"))
+        seen[n["number"]] = record(n, groups, cfg.get("default_branch", "main"), a.repo)
     with open_out(a.out) as f:
         for r in sorted(seen.values(), key=lambda r: r["number"]):
             f.write(json.dumps(r) + "\n")
+    write_since(a.out, datetime(since.year, since.month, since.day, tzinfo=timezone.utc))
     print(f"wrote {len(seen)} rows to {a.out}; gh calls {h.STATS['calls']} cache {h.STATS['cache_hits']} points {h.STATS['points']}",
           file=sys.stderr)
 

@@ -41,6 +41,8 @@ M = [
  ("gitsource.py", 'end = min(after, key=when) if after else last', 'end = last', "git task ignores merge commits"),
  ("gitsource.py", 'key = find_key(MERGE_PR.sub("", m["text"]), patterns)', 'key = find_key(m["text"], patterns)', "merge-PR number taken as a key"),
  ("gitsource.py", 'kept = [r for r in rows if r["id"] not in older]', 'kept = rows', "git tasks begun before --since kept"),
+ ("tasks.py", '        for n in ns for i in links.get(n, {}).get("closing", []))}', '        for n in ns for i in [])}', "GitHub task with an earlier merged PR kept"),
+ ("links.py", '(repo is None or (p.get("repository") or {}).get("nameWithOwner") == repo)', 'True', "closing PRs from other repos counted"),
  ("tasks.py", 'if r["base"] == branch and', 'if', "release-branch PRs kept as tasks"),
  ("tasks.py", 'and not any(b.search(r["author"] or "") for b in bot_re)]', ']', "bot PRs kept as tasks"),
  ("tasks.py", 'end=max(prs[n]["merged_at"] for n in ns)', 'end=min(prs[n]["merged_at"] for n in ns)', "task ends at first PR merge, not last"),
