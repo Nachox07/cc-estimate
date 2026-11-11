@@ -22,9 +22,12 @@ The skill runs the `cc-estimate` command. If it is not installed: `pipx install 
      test suites it triggers.
    - Add `--off <dates>` for days the user won't work on it.
    - With no ticket yet, use `--text`, then `cc-estimate attach <id> --pr <N>` once the PR exists.
-3. **Report** the interval in working days, the median, the sample size and the data date, exactly
+3. **L or XL task:** run `cc-estimate advise --size <S> --paths <planned files>` and report its verdict
+   (Split, Merge, Keep or No advice) and reason exactly as printed. Do not add a split of your own
+   when it says No advice.
+4. **Report** the interval in working days, the median, the sample size and the data date, exactly
    as printed.
-4. **Score on request:** `cc-estimate score`. Below 15 finished estimates, say it is too early to
+5. **Score on request:** `cc-estimate score`. Below 15 finished estimates, say it is too early to
    judge.
 
 If the data date is more than a month old, rebuild the history (README, "Quick start") and rerun

@@ -53,6 +53,14 @@
       "e2e"
     ]
   },
+  "advise": {
+    "layers": [
+      {"name": "shared code", "patterns": ["(^|/)(shared|common|core|lib)/"]},
+      {"name": "services", "patterns": ["(^|/)(services?|api)/"]},
+      {"name": "other code", "patterns": []},
+      {"name": "UI", "patterns": ["(^|/)(ui|web|frontend)/"]}
+    ]
+  },
   "docs_patterns": [
     "\\.(md|mdx|rst|adoc)$",
     "(^|/)docs?/"

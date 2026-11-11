@@ -4,7 +4,7 @@
   cc-estimate simulate --scenario size-matters --seed 7 --out dir
 
 Writes dir/tasks.jsonl (same contract as real task files) and dir/truth.json (the model the
-durations were drawn from). Same scenario and seed give the same files.
+durations were drawn from); advisor scenarios also write dir/plan.jsonl for `advise --plan`. Same scenario and seed give the same files.
 
 Durations are drawn in working hours, then placed on the clock by walking Monday-Friday
 09:00-18:00 UTC, at non-round minutes. A task therefore measures exactly the hours drawn, and
@@ -105,9 +105,90 @@ def thin(rnd, n):
         params=dict(sigma=0.5, large_indexes=sorted(large)))
 
 
+SIZE_LINES = {"XS": (10, 49), "S": (50, 299), "M": (300, 1499), "L": (1500, 4999), "XL": (5000, 9000)}
+SIZE_NAMES = list(SIZE_LINES)
+# Median hours per size and the lognormal sigma of each: a spread that is a fixed fraction of the duration
+# at every size except XL, whose sigma is the break.
+MEDIANS = dict(zip(SIZE_NAMES, (4.0, 4.8, 5.8, 6.9, 8.3)))
+SIGMAS = dict.fromkeys(SIZE_NAMES, 0.3)
+BREAK_SIGMAS = {**SIGMAS, "XL": 0.9}
+SMALL_MEDIANS = dict(zip(SIZE_NAMES, (0.5, 0.8, 1.2, 1.6, 2.0)))  # minutes-to-hours tasks, as in a library with quick fixes
+SMALL_SIGMAS = dict.fromkeys(SIZE_NAMES, 1.2)
+
+
+def advisor_world(rnd, sigmas, xl=60, medians=MEDIANS, base=MIN_HOURS):
+    """60 single tasks per size (`xl` of XL), shuffled so sizes interleave over time."""
+    specs = []
+    for size in SIZE_NAMES:
+        for _ in range(xl if size == "XL" else 60):
+            code = rnd.randint(*SIZE_LINES[size])
+            tests, docs = side_lines(rnd, code)
+            specs.append(dict(code=code, tests=tests, docs=docs, hours=base + lognormal(rnd, medians[size], sigmas[size])))
+    rnd.shuffle(specs)
+    return specs
+
+
+def break_point(rnd, n):
+    """60 tasks per size; the relative spread is the same at every size except XL, which is wider."""
+    return advisor_world(rnd, BREAK_SIGMAS), dict(
+        model="hours = 0.5 + median[size] * lognormal(sigma[size]); sigma 0.3 at every size except XL, 0.9",
+        params=dict(medians=MEDIANS, sigmas=BREAK_SIGMAS, break_size="XL"))
+
+
+def no_break(rnd, n):
+    """60 tasks per size; the same relative spread at every size, though the absolute width grows with the median."""
+    return advisor_world(rnd, SIGMAS), dict(
+        model="hours = 0.5 + median[size] * lognormal(sigma 0.3), the same sigma at every size",
+        params=dict(medians=MEDIANS, sigmas=SIGMAS, break_size=None))
+
+
+def weak_break(rnd, n):
+    """As break-point, but XL is only 2x as wide in relative terms: a break the advisor finds about half the time."""
+    return advisor_world(rnd, {**SIGMAS, "XL": 0.6}), dict(
+        model="as break-point with XL sigma 0.6 instead of 0.9",
+        params=dict(medians=MEDIANS, sigmas={**SIGMAS, "XL": 0.6}, break_size="XL"))
+
+
+def small_tasks(rnd, n):
+    """60 tasks per size, medians 0.5-2 hours, sigma 1.2 at every size: a wide spread that is the same share of the duration."""
+    return advisor_world(rnd, SMALL_SIGMAS, medians=SMALL_MEDIANS, base=0.05), dict(
+        model="hours = 0.05 + median[size] * lognormal(sigma 1.2), medians 0.5-2 hours, the same sigma at every size",
+        params=dict(medians=SMALL_MEDIANS, sigmas=SMALL_SIGMAS, break_size=None))
+
+
+def thin_advisor(rnd, n):
+    """A break at XL, but only 15 XL tasks."""
+    return advisor_world(rnd, BREAK_SIGMAS, xl=15), dict(
+        model="as break-point with 15 XL tasks instead of 60",
+        params=dict(medians=MEDIANS, sigmas=BREAK_SIGMAS, xl_tasks=15))
+
+
+def merge_keep(rnd, n):
+    """The break-point history, with a plan (MERGE_KEEP_PLAN) to merge or keep."""
+    specs, model = break_point(rnd, n)
+    model["model"] = "history as in break-point; the plan has two XS tasks in one area, two XS in different areas, one M"
+    return specs, model
+
+
+# Plans (`simulate` writes plan.jsonl when a scenario has one): id, size, paths.
+SPLIT_PLAN = [
+    dict(id="big", size="XL", paths=["src/lib/money.py", "src/lib/dates.py", "src/api/orders.py", "src/api/refunds.py",
+                                     "ui/orders/list.tsx", "ui/orders/detail.tsx", "tests/test_orders.py", "docs/orders.md"]),
+    dict(id="mid", size="L", paths=["src/api/orders.py", "ui/orders/list.tsx"]),
+]
+MERGE_KEEP_PLAN = [
+    dict(id="a", size="XS", paths=["src/api/orders.py"]),
+    dict(id="b", size="XS", paths=["src/api/refunds.py"]),
+    dict(id="c", size="XS", paths=["ui/header.tsx"]),
+    dict(id="d", size="XS", paths=["scripts/release.sh"]),
+    dict(id="e", size="M", paths=["src/lib/money.py", "src/lib/dates.py"]),
+]
+PLANS = {"break-point": SPLIT_PLAN, "no-break": SPLIT_PLAN, "weak-break": SPLIT_PLAN, "small-tasks": SPLIT_PLAN, "thin-advisor": SPLIT_PLAN, "merge-keep": MERGE_KEEP_PLAN}
+
 # name -> (function, default task count)
 SCENARIOS = {"size-matters": (size_matters, 800), "null": (null, 800), "test-heavy": (test_heavy, 400),
-             "thin": (thin, 30)}
+             "thin": (thin, 30), "break-point": (break_point, 0), "no-break": (no_break, 0),
+             "weak-break": (weak_break, 0), "small-tasks": (small_tasks, 0), "thin-advisor": (thin_advisor, 0), "merge-keep": (merge_keep, 0)}
 
 
 def generate(name, seed, n=None):
@@ -120,8 +201,9 @@ def generate(name, seed, n=None):
     rows, w = [], 0.0
     for i, s in enumerate(specs, 1):
         w += rnd.uniform(2, 14) if i > 1 else rnd.uniform(0, 4)
-        start = clock(round(w * 60 + rnd.uniform(0.1, 0.9)) / 60)  # starts at a random minute, not on round hours
-        end = clock(round((w + s["hours"]) * 3600) / 3600)
+        sw = w
+        start = clock(round(sw * 60 + rnd.uniform(0.1, 0.9)) / 60)  # starts at a random minute, not on round hours
+        end = clock(round((sw + s["hours"]) * 3600) / 3600)
         rows.append(dict(id=f"SIM-{i}", title=rnd.choice(["feat: add", "fix: repair", "chore: tidy"]),
                          author=LOGINS[i % 3], labels=[], start=start.isoformat(), end=end.isoformat(),
                          lines=s["code"] + s["tests"] + s["docs"], code_lines=s["code"],
@@ -149,6 +231,8 @@ def main(argv=None):
     out = Path(a.out)
     write_rows(rows, out / "tasks.jsonl")
     (out / "truth.json").write_text(json.dumps(truth, indent=2) + "\n")
+    if a.scenario in PLANS:
+        write_rows(PLANS[a.scenario], out / "plan.jsonl")
     print(f"Wrote {len(rows)} tasks and truth.json to {out}.")
     return 0
 
