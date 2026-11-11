@@ -7,9 +7,9 @@ commit (a commit span, which leaves out review and merge waiting). Commits witho
 skipped and counted.
 """
 import argparse, json, re, subprocess, sys
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
-from .files import open_out
+from .files import open_out, write_since
 
 # Tried in order, so a tracker key beats the "(#123)" a squash merge appends.
 DEFAULT_KEYS = [r"\b([A-Z][A-Z0-9]+-\d+)\b", r"(?<![\w&])(#\d+)\b"]
@@ -53,18 +53,34 @@ def merges(repo_dir, branch, since):
     return rows
 
 
-def older_keys(repo_dir, branch, since, patterns, ignore_re=None):
+def since_epoch(repo_dir, since):
+    """The instant git reads `since` as, so every query and the sidecar agree on one left edge."""
+    out = subprocess.run(["git", "-C", repo_dir, "rev-parse", f"--since={since}"], capture_output=True, text=True).stdout
+    m = re.search(r"--max-age=(\d+)", out)
+    if not m:
+        sys.exit(f"git-tasks: cannot read --since {since!r} as a date")
+    return int(m.group(1))
+
+
+def older_keys(repo_dir, branch, since, patterns, ignore_re=None, wanted=None):
     """Task keys with a commit before `since`: those tasks began outside the window, so their
-    in-window commits would give a late start and a short duration."""
+    in-window commits would give a late start and a short duration. Streams the log and stops once
+    every key in `wanted` is found. A key reused from long ago (an old "refs #123") drops today's task."""
     fmt = UNIT.join(["%ae", "%s", "%b"]) + REC
-    out = subprocess.run(["git", "-C", repo_dir, "log", branch, "--no-merges", f"--until={since}", f"--format={fmt}"],
-                         capture_output=True, text=True, check=True).stdout
-    keys = set()
-    for chunk in out.split(REC):
-        if chunk.strip("\n"):
-            email, subject, body = (chunk.strip("\n").split(UNIT) + [""] * 3)[:3]
-            if not (ignore_re and ignore_re.search(email)):
-                keys.add(find_key(subject + "\n" + body, patterns))
+    proc = subprocess.Popen(["git", "-C", repo_dir, "log", branch, "--no-merges", f"--until={since}", f"--format={fmt}"],
+                            stdout=subprocess.PIPE, text=True)
+    keys, buf = set(), ""
+    try:
+        for part in iter(lambda: proc.stdout.read(65536), ""):
+            *chunks, buf = (buf + part).split(REC)
+            for chunk in chunks:
+                email, subject, body = (chunk.strip("\n").split(UNIT) + [""] * 3)[:3]
+                if not (ignore_re and ignore_re.search(email)):
+                    keys.add(find_key(subject + "\n" + body, patterns))
+            if wanted is not None and wanted <= keys:
+                break
+    finally:
+        proc.kill(); proc.wait(); proc.stdout.close()
     return keys - {None}
 
 
@@ -126,15 +142,17 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     cfg = json.loads(open(a.config).read()) if a.config else {}
+    since = f"@{since_epoch(a.repo_dir, a.since)}"
     pats = key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex"))
     ignore = re.compile(a.ignore_authors) if a.ignore_authors else None
-    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), pats, ignore, merged=merges(a.repo_dir, a.branch, a.since))
-    older = older_keys(a.repo_dir, a.branch, a.since, pats, ignore)
+    rows, skipped = build(commits(a.repo_dir, a.branch, since), pats, ignore, merged=merges(a.repo_dir, a.branch, since))
+    older = older_keys(a.repo_dir, a.branch, since, pats, ignore, {r["id"] for r in rows})
     kept = [r for r in rows if r["id"] not in older]
     left, rows = len(rows) - len(kept), kept
     with open_out(a.out) as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+    write_since(a.out, datetime.fromtimestamp(int(since[1:]), timezone.utc))
     print(f"{len(rows)} tasks; {skipped} commits had no key and were skipped; "
           f"{left} dropped on the left (first commit before --since)", file=sys.stderr)
 

@@ -66,10 +66,21 @@ will trigger. This is context; it doesn't change the number.
 - Tasks that started before the window are dropped, since only the long-lived ones reach it. The
   window starts at the earliest task end, or at `--since`.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
-  finished. "Near" is learned: a horizon H, at least 21 days, equal to the 90th percentile of
-  calendar duration among tasks that started at least H days before the data end (found by
-  iteration; long tasks are weighted up, since fewer of them can have finished). `--censor-days`
-  sets it by hand.
+  finished. "Near" is learned: a horizon H, at least 21 days and at most half the window, equal to
+  the 90th percentile of calendar duration among tasks that started at least H days before the data
+  end (found by iteration). Long tasks are weighted up by how likely they were to have finished,
+  using the observed spread of start times. This is valid when the window is at least about 4x the
+  true 90th percentile: a task longer than the whole window is never fetched, so on a shorter
+  window H reads low and `backtest` prints a warning. With fewer than 3 long tasks to weight from,
+  the plain 90th percentile is used instead and a note says so. Tasks that ended at their last
+  commit rather than a merge (git-only source) are left out of this estimate, since they are cut
+  short. `--censor-days` sets H by hand. H is learned on the whole window, locked slice included
+  (one number, from calendar durations only). Each task's history then leaves out tasks that
+  started within H days of it, as the live estimate does.
+- `git-tasks` drops a task that has any commit before `--since` (it began outside the window; the
+  summary line counts these as dropped on the left) and records the resolved `--since` beside the
+  tasks file (`<file>.meta.json`), which `backtest` and `estimate` then use as the window start.
+  A key reused from long ago (an old "refs #123") drops today's task with it.
 
 The `size` rows assume you name the final size before you start, so they are a best case. Logged
 estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40
@@ -104,8 +115,7 @@ cc-estimate init                             # writes cc-estimate.json; set repo
 cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
 
-A task with a commit before `--since` began outside the window, so it is dropped (the summary line
-counts these as dropped on the left) rather than given a late start.
+`--since` takes any date git understands; the resolved date is saved with the tasks file.
 
 **From GitHub** (pull requests and the issues they close):
 

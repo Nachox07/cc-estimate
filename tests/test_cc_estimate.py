@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import os, subprocess
 
 from cc_estimate import backtest as bt, estimate, gitsource, links, spans, tasks
+from cc_estimate.files import read_since
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -220,6 +221,16 @@ class Backtest(unittest.TestCase):
         after = bt.run(self.rows, [i], "size", 10, 0.1, 0.9)[0]
         self.assertEqual((before["width"], before["inside"]), (after["width"], after["inside"]))
 
+    def test_history_leaves_out_tasks_that_started_within_the_lag(self):
+        idx = [250]
+        self.assertTrue(bt.run(self.rows, idx, "size", 10, 0.1, 0.9))
+        self.assertEqual(bt.run(self.rows, idx, "size", 10, 0.1, 0.9, lag=10 ** 4), [])
+
+    def test_weighted_quantile_matches_the_plain_one_for_equal_weights(self):
+        xs = [3.0, 1.0, 8.0, 2.0, 9.0, 4.0, 7.0]
+        for p in (0.1, 0.5, 0.9):
+            self.assertAlmostEqual(bt.wq([(x, 1.0) for x in xs], p), bt.q(xs, p))
+
     def test_size_beats_the_plain_baseline_when_size_drives_duration(self):
         idx = list(range(200, len(self.rows)))
         size = bt.score(bt.run(self.rows, idx, "size", 10, 0.1, 0.9))
@@ -376,8 +387,27 @@ class GitSource(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 gitsource.main(["--repo-dir", d, "--since", "2026-10-01", "--out", str(out)])
             ids = [json.loads(l)["id"] for l in out.read_text().splitlines()]
+            since, nothing = read_since(out), read_since(Path(d, "nothing.jsonl"))
         self.assertEqual(ids, ["ABC-2"])
         self.assertIn("1 dropped on the left", err.getvalue())
+        self.assertEqual(since.tzinfo, timezone.utc)
+        self.assertIsNone(nothing)
+
+    def test_older_keys_finds_only_keys_with_a_commit_before_the_edge(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+                   "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+            git = lambda *args, **kw: subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env={**env, **kw})
+            git("init", "-q")
+            for i, (msg, when) in enumerate([("ABC-1 old", "2026-08-03T09:00:00+00:00"), ("ABC-2 old", "2026-08-04T09:00:00+00:00"),
+                                             ("ABC-3 new", "2026-10-05T09:00:00+00:00")]):
+                Path(d, f"f{i}.txt").write_text("x\n")
+                git("add", ".")
+                git("commit", "-qm", msg, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+            pats = gitsource.key_patterns(None)
+            edge = "@" + str(int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()))
+            self.assertEqual(gitsource.older_keys(d, "HEAD", edge, pats), {"ABC-1", "ABC-2"})
+            self.assertEqual(gitsource.older_keys(d, "HEAD", edge, pats, wanted={"ABC-2"}) & {"ABC-2"}, {"ABC-2"})
 
     def test_commits_with_the_same_key_make_one_task(self):
         with tempfile.TemporaryDirectory() as d:
@@ -534,14 +564,19 @@ class Window(unittest.TestCase):
         self.assertEqual(win["cut"], max(r["end"] for r in rows) - timedelta(days=win["horizon"]))
         self.assertTrue(all(r["start"] <= win["cut"] for r in kept))
 
-    def lognormal_window(self, seed=1, n=40000, span=120, median=6.0, sigma=1.2):
-        """Tasks start at random over a longer period; only those that end inside [0, span] are fetched."""
+    def lognormal_window(self, seed=1, n=40000, span=120, median=6.0, sigma=1.2, growth=0.0):
+        """Tasks start at random (a rate growing as exp(growth * t / span)) over a longer period; only those
+        that end inside [0, span] are fetched."""
         rng, rows = random.Random(seed), []
         for _ in range(n):
-            s, d = rng.uniform(-200, span), median * rng.lognormvariate(0, sigma)
+            while True:
+                s = rng.uniform(-300, span)
+                if rng.random() <= math.exp(growth * (s - span) / span):
+                    break
+            d = median * rng.lognormvariate(0, sigma)
             if 0 <= s + d <= span:
                 rows.append(self.row(s, d))
-        return rows, median * math.exp(sigma * NormalDist().inv_cdf(0.9))
+        return [r for r in rows if r["start"] >= self.T0], median * math.exp(sigma * NormalDist().inv_cdf(0.9))
 
     def first_half_horizon(self, rows):
         """The previous rule: p90 of the tasks started in the first half of the window."""
@@ -550,6 +585,8 @@ class Window(unittest.TestCase):
         return bt.q(days, 0.9)
 
     def test_the_learned_horizon_is_near_the_true_p90_of_a_merged_in_window_fetch(self):
+        """Holds only while the window is at least ~4x the true p90 (here 120 d against 27.9 d): a task longer
+        than the window is never fetched, so a longer-tailed history reads low (next test)."""
         errs = []
         for seed in range(1, 6):
             rows, true = self.lognormal_window(seed)
@@ -557,6 +594,61 @@ class Window(unittest.TestCase):
             errs.append((abs(learned - true) / true, abs(self.first_half_horizon(rows) - true) / true))
             self.assertLess(errs[-1][0], 0.10, (seed, learned, true))
         self.assertLess(sum(e[0] for e in errs), sum(e[1] for e in errs))  # smaller than the first-half rule's error
+
+    def test_a_window_under_four_times_the_p90_reads_low_and_says_so(self):
+        """Documents the limit: sigma 1.8 puts the true p90 at 60 d in a 120 d window, and the horizon lands 25-40% under."""
+        rows, true = self.lognormal_window(1, sigma=1.8)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            h = bt.window(rows, since=self.T0)[1]["horizon"]
+        self.assertLess(h, 0.85 * true)
+        self.assertIn("window is too short", err.getvalue())
+
+    def test_a_well_sized_window_prints_no_warning(self):
+        rows, _ = self.lognormal_window(1)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            bt.window(rows, since=self.T0)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_a_growing_start_rate_does_not_bias_the_horizon(self):
+        for seed in range(1, 7):
+            rows, true = self.lognormal_window(seed, growth=4.0)
+            learned = bt.window(rows, since=self.T0)[1]["horizon"]
+            self.assertLess(abs(learned - true) / true, 0.10, (seed, learned, true))
+
+    def test_one_long_task_in_a_small_history_does_not_set_the_horizon(self):
+        rng = random.Random(0)
+        rows = [self.row(rng.uniform(0, 100), rng.uniform(2, 6)) for _ in range(39)]
+        rows += [self.row(5, 110), self.row(0, 1)]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            kept, win = bt.window(rows, since=self.T0)
+        self.assertEqual(win["horizon"], bt.MIN_CENSOR_DAYS)
+        self.assertGreater(len(kept), 20)
+        self.assertIn("unweighted p90 is used", err.getvalue())
+
+    def test_the_horizon_is_capped_at_half_the_window(self):
+        rows = [self.row(d, 70) for d in range(0, 40, 2)] + [self.row(d, 3) for d in range(0, 100, 2)]
+        h, _ = bt.horizon(rows, self.T0, max(r["end"] for r in rows))
+        self.assertLessEqual(h, (max(r["end"] for r in rows) - self.T0).days / 2)
+
+    def test_a_two_cycle_returns_its_smaller_value_and_says_so(self):
+        rng, rows = random.Random(364), []
+        for _ in range(rng.randint(15, 60)):
+            s, d = rng.uniform(0, 150), 6 * math.exp(1.4 * rng.gauss(0, 1))
+            if s + d <= 180:
+                rows.append(self.row(s, d))
+        rows.append(self.row(0, 1))
+        h, notes = bt.horizon(rows, self.T0, max(r["end"] for r in rows))
+        self.assertAlmostEqual(h, 47.27, places=1)
+        self.assertTrue(any("did not settle" in n for n in notes))
+
+    def test_commit_ended_tasks_do_not_set_the_horizon(self):
+        rng = random.Random(2)
+        rows = [self.row(s, d) for s, d in ((rng.uniform(0, 100), rng.uniform(2, 6)) for _ in range(300))]
+        rows += [dict(self.row(s, 50), end_kind="commit") for s in range(0, 90, 3)]
+        self.assertEqual(bt.window(rows, since=self.T0)[1]["horizon"], bt.MIN_CENSOR_DAYS)
 
     def test_censor_days_overrides_the_learned_horizon(self):
         rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]

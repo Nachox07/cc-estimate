@@ -19,7 +19,7 @@ from . import backtest as bt
 from . import classify as cl
 from . import gitsource as gs
 from .links import LABEL_EVENTS, blocked_spans
-from .files import open_out
+from .files import open_out, read_since
 
 LEVEL = 0.8
 LO_P, HI_P = (1 - LEVEL) / 2, 1 - (1 - LEVEL) / 2
@@ -62,7 +62,7 @@ def ranges(tasks_path, tz, size, cfg):
     if not rows:
         sys.exit(f"{p} has no tasks.")
     newest = max(r["end"] for r in rows)
-    rows, win = bt.window(rows)
+    rows, win = bt.window(rows, since=read_since(tasks_path))
     if len(rows) < MIN_N:
         sys.exit(f"Only {len(rows)} finished tasks fall inside the window {win['start']:%Y-%m-%d} to {win['cut']:%Y-%m-%d}: not enough history yet.")
     same = [r["y"] for r in rows if r["size"] == size]

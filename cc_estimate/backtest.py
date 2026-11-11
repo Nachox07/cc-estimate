@@ -8,10 +8,13 @@ Each task is estimated at its start using only tasks already finished by then.
 As-of inputs: title kind, epic label, author. `size` rows assume a perfect planner who
 names the final size bucket in advance, so they are an upper bound for what a planned size buys.
 """
-import argparse, json, statistics as st
+import argparse, json, sys, statistics as st
+from bisect import bisect_right
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from .files import read_since
 
 DAY0, DAY1 = 9, 18
 BUCKETS = ((50, "XS"), (300, "S"), (1500, "M"), (5000, "L"), (10 ** 12, "XL"))
@@ -99,7 +102,7 @@ def load(path, tz, cfg=None, profiles=None):
         start, end = parse(r["start"]), parse(r["end"])
         blocked = [[parse(x), parse(y)] for spans in (r.get("excluded") or {}).values() for x, y in spans]
         off = off_dates(cfg or {}, r["author"])
-        rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
+        rows.append(dict(id=r["id"], start=start, end=end, end_kind=r.get("end_kind"), y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
                          kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r["lines"]),
                          **profile_fields(profiles.get(r["id"]))))
@@ -110,35 +113,76 @@ def load(path, tz, cfg=None, profiles=None):
 
 MIN_CENSOR_DAYS = 21
 MAX_ITER = 50
+MIN_ABOVE = 3      # observed tasks above the p90 needed to trust the weights
+HEAVY_SHARE = 0.05  # weight share of tasks longer than half the window that triggers a warning
 
 
 def horizon(rows, w0, data_end):
     """Fixed point H >= MIN_CENSOR_DAYS: H is the p90 calendar duration of tasks starting by data_end - H.
-    Such a task longer than H is seen only if it started early enough, so each is weighted by the inverse
-    of that chance (starts assumed uniform over the window); unweighted, the fixed point sits below the true p90."""
+    Such a task longer than H is seen only if it started early enough, so it is weighted by 1 / F(data_end - d),
+    F being the start-time CDF of the tasks not longer than H (all of them seen); unweighted, the fixed point
+    sits below the true p90. Valid while the window is at least ~4x the true p90: a task longer than the whole
+    window is never fetched. H is capped at half the window. Returns (H, notes)."""
     span = (data_end - w0).total_seconds() / 86400
-    h = MIN_CENSOR_DAYS
-    for _ in range(MAX_ITER):
-        pairs = []
-        for r in rows:
-            d = (r["end"] - r["start"]).total_seconds() / 86400
-            if r["start"] <= data_end - timedelta(days=h) and d < span:
-                pairs.append((d, 1.0 if d <= h else (span - h) / (span - d)))
-        nxt = max(MIN_CENSOR_DAYS, wq(pairs, 0.9)) if pairs else MIN_CENSOR_DAYS
-        if abs(nxt - h) < 0.01:
-            return nxt
-        h = nxt
-    return h
+    pts = sorted(((r["start"] - w0).total_seconds() / 86400, (r["end"] - r["start"]).total_seconds() / 86400) for r in rows)
+    cap = max(MIN_CENSOR_DAYS, span / 2)
+
+    def sample(h, weighted):
+        mine = [(s, d) for s, d in pts if s <= span - h]
+        short = [s for s, d in mine if d <= h]
+        out = []
+        for s, d in mine:
+            w = 1.0
+            if weighted and d > h:
+                f = bisect_right(short, span - d) / len(short) if short else 0
+                if f <= 0:
+                    continue
+                w = 1 / f
+            out.append((d, w))
+        return out
+
+    def fixed(weighted):
+        h, seen = MIN_CENSOR_DAYS, []
+        for _ in range(MAX_ITER):
+            pairs = sample(h, weighted)
+            nxt = round(min(cap, max(MIN_CENSOR_DAYS, wq(pairs, 0.9))) if pairs else MIN_CENSOR_DAYS, 2)
+            if abs(nxt - h) < 0.01:
+                return nxt, True
+            if nxt in seen:  # a cycle: take its smallest value
+                return min(seen[seen.index(nxt):]), False
+            seen.append(nxt)
+            h = nxt
+        return h, False
+
+    notes = []
+    h, ok = fixed(True)
+    pairs = sample(h, True)
+    if sum(d > h for d, _ in pairs) < MIN_ABOVE:
+        h, ok = fixed(False)
+        pairs = sample(h, False)
+        notes.append(f"horizon: fewer than {MIN_ABOVE} observed tasks above the weighted p90, so the unweighted p90 is used")
+    if not ok:
+        notes.append(f"horizon: the iteration did not settle; using {h:.1f} days")
+    total = sum(w for _, w in pairs)
+    if total and sum(w for d, w in pairs if d > span / 2) / total > HEAVY_SHARE:
+        notes.append("horizon: tasks longer than half the window carry much of the weight; the window is too short "
+                     "for this history, so the horizon is probably too low")
+    return h, notes
 
 
 def wq(pairs, p):
-    """Smallest value whose cumulative weight reaches share p."""
-    pairs.sort()
-    need, acc = p * sum(w for _, w in pairs), 0.0
+    """Weighted quantile with q()'s interpolation (equal weights give the same value as q)."""
+    pairs = sorted(pairs)
+    if len(pairs) == 1:
+        return pairs[0][0]
+    tot, before = sum(w for _, w in pairs) - pairs[-1][1], 0.0
+    pos = []
     for d, w in pairs:
-        acc += w
-        if acc >= need:
-            return d
+        pos.append((before / tot, d)); before += w
+    for (p0, d0), (p1, d1) in zip(pos, pos[1:]):
+        if p <= p1:
+            return d0 + (d1 - d0) * (p - p0) / (p1 - p0) if p1 > p0 else d1
+    return pos[-1][1]
 
 
 def window(rows, since=None, censor_days=None):
@@ -149,11 +193,15 @@ def window(rows, since=None, censor_days=None):
     data_end = max(r["end"] for r in rows)
     w0 = since or min(r["end"] for r in rows)  # a merged-in-window fetch has no end before its start
     inside = [r for r in rows if r["start"] >= w0]
+    notes = []
     if censor_days is None:
-        censor_days = horizon(inside, w0, data_end)
+        merge_ended = [r for r in inside if r.get("end_kind") != "commit"]  # commit-ended tasks are cut short, not absent
+        censor_days, notes = horizon(merge_ended or inside, w0, data_end)
+        for n in notes:
+            print(n, file=sys.stderr)
     cut = data_end - timedelta(days=censor_days)
     kept = [r for r in inside if r["start"] <= cut]
-    return kept, dict(start=w0, cut=cut, horizon=censor_days, early=len(rows) - len(inside), late=len(inside) - len(kept))
+    return kept, dict(start=w0, cut=cut, horizon=censor_days, early=len(rows) - len(inside), late=len(inside) - len(kept), notes=notes)
 
 
 def add_load(rows):
@@ -256,11 +304,14 @@ def estimate(h, t, name, k_min, lo_p, hi_p):
     return q(s, lo_p) * f, q(s, 0.5) * f, q(s, hi_p) * f, fell
 
 
-def run(rows, idx, name, k_min, lo_p, hi_p):
+def run(rows, idx, name, k_min, lo_p, hi_p, lag=0):
+    """`lag` days: history leaves out tasks that started that recently, as the live estimate does."""
     out, alpha = [], 1 - (hi_p - lo_p)
     for i in idx:
         t = rows[i]
         h = [x for x in rows[:i] if x["end"] <= t["start"]]
+        if lag:
+            h = [x for x in h if x["start"] <= t["start"] - timedelta(days=lag)]
         e = estimate(h, t, name, k_min, lo_p, hi_p)
         if not e:
             continue
@@ -303,12 +354,12 @@ def main(argv=None):
     ap.add_argument("--censor-days", type=float,
                     help="drop tasks starting this close to the data end: their slow siblings are still open "
                          "(default: learned from the data, at least 21)")
-    ap.add_argument("--since", help="start of the fetched window, YYYY-MM-DD (default: the earliest task end)")
+    ap.add_argument("--since", help="start of the fetched window, YYYY-MM-DD (default: the one git-tasks recorded, else the earliest task end)")
     a = ap.parse_args(argv)
     profiles = {p["id"]: p for p in map(json.loads, Path(a.profiles).read_text().splitlines())} if a.profiles else {}
     cfg = json.loads(Path(a.config).read_text()) if a.config else {}
     rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles)
-    since = datetime.fromisoformat(a.since).replace(tzinfo=ZoneInfo(a.tz or cfg.get("timezone", "UTC"))) if a.since else None
+    since = datetime.fromisoformat(a.since).replace(tzinfo=ZoneInfo(a.tz or cfg.get("timezone", "UTC"))) if a.since else read_since(a.inp)
     rows, win = window(rows, since, a.censor_days)
     n = len(rows)
     s = split(n, a.min_history)
@@ -333,7 +384,7 @@ def main(argv=None):
     strata = {"all tasks": lambda t: True, "planned M+": lambda t: t["size"] in ("M", "L", "XL"),
               "planned L+": lambda t: t["size"] in ("L", "XL")}
     for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, n))):
-        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p) for name in METHODS
+        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p, win["horizon"]) for name in METHODS
                    if profiles or name not in NEEDS_PROFILES}  # without classify output they repeat other rows
         for sname, keep in strata.items():
             print(f"\n== {label} · {sname} ==")
