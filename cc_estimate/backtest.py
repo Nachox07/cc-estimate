@@ -51,6 +51,27 @@ def biz_hours(a, b, tz, off=frozenset(), blocked=()):
     return total / 3600
 
 
+def km_quantile(obs, p):
+    """The p-quantile of a duration by Kaplan-Meier, from (hours, finished) pairs. A case still
+    open (finished=False) stays in the risk set until its time and never ends the wait, so slow
+    waits are not dropped. Returns (hours, reached); if the curve never falls to 1-p the longest
+    time seen comes back with reached=False, a floor and not an estimate."""
+    obs = sorted(obs, key=lambda o: (o[0], not o[1]))  # at a tie, finishes come before censorings
+    at_risk, surv, i = len(obs), 1.0, 0
+    while i < len(obs):
+        t, j, done = obs[i][0], i, 0
+        while j < len(obs) and obs[j][0] == t:
+            done += obs[j][1]
+            j += 1
+        if done:
+            surv *= 1 - done / at_risk
+            if surv <= 1 - p + 1e-9:
+                return t, True
+        at_risk -= j - i
+        i = j
+    return obs[-1][0], False
+
+
 def title_kind(t):
     t = t.lower()
     for k in ("feat", "fix", "chore", "ci", "docs", "test", "refactor", "perf", "revert"):
@@ -95,7 +116,55 @@ def profile_fields(p):
                 spread=str(min(len(p["areas"]), 3)), approval_set=frozenset(ap))
 
 
-def load(path, tz, cfg=None, profiles=None):
+def reviewer_times(items):
+    """{reviewer: first time they were asked (or first reviewed)} from a record's `reviewers`."""
+    out = {}
+    for x in items or []:
+        at = parse(x["at"])
+        out[x["who"]] = min(at, out.get(x["who"], at))
+    return out
+
+
+def load_queue(path):
+    """The all-PRs file (`fetch-queue`), times parsed. A PR with no ready_at is still a draft."""
+    return [dict(number=r["number"], ready=parse(r["ready_at"]) if r.get("ready_at") else None,
+                 closed=parse(r["closed_at"]) if r.get("closed_at") else None, merged=r.get("state") == "MERGED",
+                 reviewers=reviewer_times(r.get("reviewers")))
+            for r in map(json.loads, Path(path).read_text().splitlines())]
+
+
+def queue_path(tasks_path):
+    """`x.tasks.jsonl` goes with `x.queue.jsonl`; any other name has no default."""
+    p = Path(tasks_path)
+    return p.with_name(p.name[:-len(".tasks.jsonl")] + ".queue.jsonl") if p.name.endswith(".tasks.jsonl") else None
+
+
+def queue_at(pool, ready, reviewers, skip=()):
+    """PRs waiting for review at `ready`, as known at that instant: (on the same reviewers, repo-wide).
+    Only requests made by `ready` count, for this PR and for the others, and a PR counts as waiting
+    until the moment it merged or closed. With no reviewer known yet the repo-wide count stands in."""
+    who = {w for w, at in reviewers.items() if at <= ready}
+    same = repo = 0
+    for p in pool:
+        if p["number"] in skip or p["ready"] is None or p["ready"] > ready:
+            continue
+        if p["closed"] is not None and p["closed"] <= ready:
+            continue
+        repo += 1
+        same += any(at <= ready and w in who for w, at in p["reviewers"].items())
+    return (same if who else repo), repo
+
+
+def add_queue(rows, pool):
+    for t in rows:
+        if t["ready"]:
+            t["queue"], t["queue_repo"] = queue_at(pool, t["ready"], t["reviewers"], set(t["prs"]))
+
+
+def load(path, tz, cfg=None, profiles=None, pool=None):
+    """Task rows. A task with `ready_at` also gets its working hours split at that instant:
+    `coding_y` (start to ready) and `wait_y` (ready to end), on the same clock and exclusions as `y`.
+    With `pool` (the all-PRs file) it gets the reviewer queue it faced at ready."""
     profiles = profiles or {}
     rows, old = [], 0
     for r in map(json.loads, Path(path).read_text().splitlines()):
@@ -103,8 +172,13 @@ def load(path, tz, cfg=None, profiles=None):
         start, end = parse(r["start"]), parse(r["end"])
         blocked = [[parse(x), parse(y)] for spans in (r.get("excluded") or {}).values() for x, y in spans]
         off = off_dates(cfg or {}, r["author"])
+        ready = min(max(parse(r["ready_at"]), start), end) if r.get("ready_at") else None
         rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
+                         ready=ready, prs=r.get("prs") or [], reviewers=reviewer_times(r.get("reviewers")),
+                         coding_y=biz_hours(start, ready, tz, off, blocked) if ready else None,
+                         wait_y=biz_hours(ready, end, tz, off, blocked) if ready else None,
+                         queue=None, queue_repo=None,
                          kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r.get("code_lines", r["lines"])),
                          test_heavy=r.get("test_lines", 0) > TEST_HEAVY * r.get("code_lines", r["lines"]),
                          **profile_fields(profiles.get(r["id"]))))
@@ -113,6 +187,8 @@ def load(path, tz, cfg=None, profiles=None):
               file=sys.stderr)
     rows.sort(key=lambda x: x["start"])
     add_load(rows)
+    if pool is not None:
+        add_queue(rows, pool)
     return rows
 
 
@@ -126,12 +202,20 @@ def add_load(rows):
             else sum(1 for x in open_ if not x["approval_set"])
 
 
+def tercile_cuts(values):
+    return (q(values, 1 / 3), q(values, 2 / 3)) if values else None
+
+
+def tercile(v, cuts):
+    return "low" if v <= cuts[0] else "mid" if v <= cuts[1] else "high"
+
+
 def bucket_load(rows, fit_rows):
     """Low / mid / high by terciles fitted on `fit_rows` only (the tuning slice)."""
-    for key in ("load_all", "load_group"):
-        cuts = (q([r[key] for r in fit_rows], 1 / 3), q([r[key] for r in fit_rows], 2 / 3))
+    for key in ("load_all", "load_group", "queue"):
+        cuts = tercile_cuts([r[key] for r in fit_rows if r.get(key) is not None])
         for r in rows:
-            r[key + "_b"] = "low" if r[key] <= cuts[0] else "mid" if r[key] <= cuts[1] else "high"
+            r[key + "_b"] = tercile(r[key], cuts) if cuts and r.get(key) is not None else None
 
 
 def q(xs, p):
@@ -165,10 +249,13 @@ METHODS = {
     "e2e+size": match(["e2e", "size"]),
     "size+team load": match(["size", "load_all_b"]),
     "size+group load": match(["size", "load_group_b"]),
+    "queue": match(["queue_b"]),
+    "size+queue": match(["size", "queue_b"]),
 }
+SPLIT_ONLY = ("queue", "size+queue")  # scored on the WAIT table, not on total cycle time
 # On too few matches, fall back down this chain before the trailing-30-day baseline.
 FALLBACK = {"profile+size": ["approvals+size", "size"], "approvals+size": ["size"], "e2e+size": ["size"],
-            "size+team load": ["size"], "size+group load": ["size"]}
+            "size+team load": ["size"], "size+group load": ["size"], "size+queue": ["queue", "size"]}
 NEEDS_PROFILES = {"profile", "profile+size", "approvals+size", "e2e+size", "size+group load"}
 PACE_PRIOR = 15
 MIN_TASKS = 40   # below this a backtest says nothing useful
@@ -260,12 +347,17 @@ def main(argv=None):
     ap.add_argument("--level", type=float, default=0.8)
     ap.add_argument("--config")
     ap.add_argument("--profiles", help="profiles jsonl from classify.py")
+    ap.add_argument("--queue", help="all-PRs file from fetch-queue; default: <name>.queue.jsonl beside <name>.tasks.jsonl")
     ap.add_argument("--censor-days", type=int, default=21,
                     help="drop tasks starting this close to the data end: their slow siblings are still open")
     a = ap.parse_args(argv)
     profiles = {p["id"]: p for p in map(json.loads, Path(a.profiles).read_text().splitlines())} if a.profiles else {}
     cfg = json.loads(Path(a.config).read_text()) if a.config else {}
-    rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles)
+    qpath = a.queue or queue_path(a.inp)
+    if a.queue and not Path(a.queue).is_file():
+        sys.exit(f"backtest: no queue file at {a.queue}")
+    pool = load_queue(qpath) if qpath and Path(qpath).is_file() else None
+    rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles, pool)
     data_end = max((r["end"] for r in rows), default=None)
     cut = data_end - timedelta(days=a.censor_days) if data_end else None
     dropped = sum(r["start"] > cut for r in rows) if cut else 0
@@ -294,10 +386,39 @@ def main(argv=None):
               "planned L+": lambda t: t["size"] in ("L", "XL")}
     for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, n))):
         results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p) for name in METHODS
-                   if profiles or name not in NEEDS_PROFILES}  # without classify output they repeat other rows
+                   if name not in SPLIT_ONLY
+                   and (profiles or name not in NEEDS_PROFILES)}  # without classify output they repeat other rows
         for sname, keep in strata.items():
             print(f"\n== {label} · {sname} ==")
             table(results, keep)
+    split_tables(rows, a, lo_p, hi_p, pool is not None)
+
+
+CODING_METHODS = ("baseline: repo", "baseline: same author", "size")
+WAIT_METHODS = CODING_METHODS + SPLIT_ONLY
+
+
+def split_tables(rows, a, lo_p, hi_p, have_queue):
+    """The same scoring on coding time and on waiting time, for tasks that carry `ready_at`.
+    Terciles of the queue are fitted on this table's tuning slice only."""
+    part = [r for r in rows if r["wait_y"] is not None]
+    if not part:
+        return
+    s = split(len(part), a.min_history)
+    if not s:
+        print(f"\n{len(part)} tasks carry ready_at: too few to score coding and waiting (needs {MIN_TASKS}).")
+        return
+    first, lock = s
+    bucket_load(part, part[:lock])
+    queued = have_queue and any(r["queue"] is not None for r in part)
+    print(f"\ncoding and waiting: {len(part)} tasks carry ready_at; tune: [{first},{lock})  locked: [{lock},{len(part)})"
+          + ("" if queued else "  (no queue file: queue rows left out)"))
+    for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, len(part)))):
+        for title, key, names in (("CODING", "coding_y", CODING_METHODS), ("WAIT", "wait_y", WAIT_METHODS)):
+            view = [dict(r, y=r[key]) for r in part]
+            results = {n: run(view, list(idx), n, a.k_min, lo_p, hi_p) for n in names if queued or n not in SPLIT_ONLY}
+            print(f"\n== {label} · {title} ==")
+            table(results, lambda t: True)
 
 
 if __name__ == "__main__":
