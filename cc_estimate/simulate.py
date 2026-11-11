@@ -121,8 +121,13 @@ def wait_dominates(rnd, n):
     opened every 0.5-3.2 working hours, so many are in flight. Each asks team-a (50%), team-b (40%)
     or both (10%), plus one person from each team. Waiting is drawn in order of ready time, from
     the PRs already ready and unmerged on the same team(s), so the queue is built, not assumed.
-    A quarter of PRs name their reviewers only after they are ready, and 6% are closed unmerged.
-    The data ends when the last PR is opened; PRs not done by then are open."""
+    A quarter of PRs name their reviewers only after they are ready, and 6% are closed unmerged. Of the
+    rest, two in five have their reviewers requested a few seconds after ready, as CODEOWNERS does
+    (picked by index, not drawn, so the other draws do not move). The first reviewer to answer ends
+    their own request and their team's; the other team's request stays until the merge.
+    The data ends when the last PR is opened; PRs not done by then are open.
+    Measured over seeds 0-30 with the real loader: 31 of 31 meet the bars; the closest is seed 10, WAIT
+    queue at 0.84 of the baseline's Winkler against the 0.85 bar (seed 19: 0.83)."""
     specs, w = [], 0.0
     for i in range(n):
         w += rnd.uniform(*GAP)
@@ -130,7 +135,7 @@ def wait_dominates(rnd, n):
         tests, docs = side_lines(rnd, code)
         coding = MIN_HOURS + lognormal(rnd, CODING_BASE + code / CODING_LINES, CODING_SIGMA)
         teams = rnd.choices([("team-a",), ("team-b",), ("team-a", "team-b")], [5, 4, 1])[0]
-        specs.append(dict(code=code, tests=tests, docs=docs, start=w, ready=w + coding, teams=teams,
+        specs.append(dict(code=code, tests=tests, docs=docs, start=w, ready=w + coding, teams=teams, idx=i,
                           late=rnd.random() < LATE_REQUEST, task=rnd.random() >= ABANDONED))
     cutoff, open_ = w, []
     for s in sorted(specs, key=lambda s: s["ready"]):
@@ -138,9 +143,13 @@ def wait_dominates(rnd, n):
         wait = MIN_HOURS + lognormal(rnd, WAIT_BASE + HOURS_PER_QUEUED_PR * depth, WAIT_SIGMA)
         s["end"], s["hours"] = s["ready"] + wait, s["ready"] + wait - s["start"]
         at = s["ready"] + wait * rnd.uniform(0.3, 0.8) if s["late"] else s["ready"] - rnd.uniform(0, 0.3)
-        who = [f"team:acme/{t}" for t in s["teams"]] + [f"user:{rnd.choice(TEAMS[t])}" for t in s["teams"]]
-        s["reviewers"] = [(x, at) for x in who]
+        if not s["late"] and s["idx"] % 5 < 2:
+            at = s["ready"] + (1 + s["idx"] % 3) / 3600
+        users = [f"user:{rnd.choice(TEAMS[t])}" for t in s["teams"]]
         s["first_review"] = s["ready"] + wait * rnd.uniform(0.85, 0.98)
+        answered = {users[0], f"team:acme/{s['teams'][0]}"}
+        s["reviewers"] = [(x, at, s["first_review"] if x in answered else None)
+                          for x in [f"team:acme/{t}" for t in s["teams"]] + users]
         s["state"] = "OPEN" if s["end"] > cutoff else "MERGED" if s["task"] else "CLOSED"
     return specs, dict(
         model=f"coding = 0.5 + ({CODING_BASE} + code_lines / {CODING_LINES}) * lognormal(sigma {CODING_SIGMA}); "
@@ -167,7 +176,8 @@ def queue_row(i, s, cutoff):
                 ready_at=instant(s["ready"]) if seen(s["ready"]) else None,
                 first_review_at=instant(s["first_review"]) if seen(s["first_review"]) else None,
                 closed_at=instant(s["end"]) if s["state"] != "OPEN" else None,
-                reviewers=[dict(who=x, at=instant(at)) for x, at in sorted(s["reviewers"], key=lambda r: r[1]) if seen(at)])
+                reviewers=[dict(who=x, at=instant(at), done_at=instant(done) if seen(done) else None)
+                           for x, at, done in sorted(s["reviewers"], key=lambda r: r[1]) if seen(at)])
 
 
 def generate_all(name, seed, n=None):
