@@ -1,7 +1,8 @@
 """Stdlib tests on synthetic data. Run: python3 -m unittest discover -s tests"""
-import contextlib, io, json, random, re, tempfile, unittest
+import contextlib, io, json, math, random, re, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import NormalDist
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -359,6 +360,25 @@ class Privacy(unittest.TestCase):
 
 
 class GitSource(unittest.TestCase):
+    def test_a_task_begun_before_since_is_dropped_not_given_a_late_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+                   "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+            git = lambda *args, **kw: subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env={**env, **kw})
+            git("init", "-q")
+            for i, (msg, when) in enumerate([("ABC-1 start", "2026-08-03T09:00:00+02:00"), ("ABC-2 new", "2026-10-05T09:00:00+02:00"),
+                                             ("ABC-1 finish", "2026-10-06T09:00:00+02:00"), ("ABC-2 more", "2026-10-07T09:00:00+02:00")]):
+                Path(d, f"f{i}.txt").write_text("x\n")
+                git("add", ".")
+                git("commit", "-qm", msg, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+            out = Path(d, "out.jsonl")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                gitsource.main(["--repo-dir", d, "--since", "2026-10-01", "--out", str(out)])
+            ids = [json.loads(l)["id"] for l in out.read_text().splitlines()]
+        self.assertEqual(ids, ["ABC-2"])
+        self.assertIn("1 dropped on the left", err.getvalue())
+
     def test_commits_with_the_same_key_make_one_task(self):
         with tempfile.TemporaryDirectory() as d:
             env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
@@ -513,6 +533,30 @@ class Window(unittest.TestCase):
         self.assertGreater(win["horizon"], 40)
         self.assertEqual(win["cut"], max(r["end"] for r in rows) - timedelta(days=win["horizon"]))
         self.assertTrue(all(r["start"] <= win["cut"] for r in kept))
+
+    def lognormal_window(self, seed=1, n=40000, span=120, median=6.0, sigma=1.2):
+        """Tasks start at random over a longer period; only those that end inside [0, span] are fetched."""
+        rng, rows = random.Random(seed), []
+        for _ in range(n):
+            s, d = rng.uniform(-200, span), median * rng.lognormvariate(0, sigma)
+            if 0 <= s + d <= span:
+                rows.append(self.row(s, d))
+        return rows, median * math.exp(sigma * NormalDist().inv_cdf(0.9))
+
+    def first_half_horizon(self, rows):
+        """The previous rule: p90 of the tasks started in the first half of the window."""
+        w0, end = min(r["end"] for r in rows), max(r["end"] for r in rows)
+        days = [(r["end"] - r["start"]).total_seconds() / 86400 for r in rows if w0 <= r["start"] <= w0 + (end - w0) / 2]
+        return bt.q(days, 0.9)
+
+    def test_the_learned_horizon_is_near_the_true_p90_of_a_merged_in_window_fetch(self):
+        errs = []
+        for seed in range(1, 6):
+            rows, true = self.lognormal_window(seed)
+            learned = bt.window(rows, since=self.T0)[1]["horizon"]
+            errs.append((abs(learned - true) / true, abs(self.first_half_horizon(rows) - true) / true))
+            self.assertLess(errs[-1][0], 0.10, (seed, learned, true))
+        self.assertLess(sum(e[0] for e in errs), sum(e[1] for e in errs))  # smaller than the first-half rule's error
 
     def test_censor_days_overrides_the_learned_horizon(self):
         rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]

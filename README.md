@@ -66,8 +66,10 @@ will trigger. This is context; it doesn't change the number.
 - Tasks that started before the window are dropped, since only the long-lived ones reach it. The
   window starts at the earliest task end, or at `--since`.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
-  finished. "Near" is learned: the 90th percentile of calendar duration for tasks from the first
-  half of the window, at least 21 days. `--censor-days` sets it by hand.
+  finished. "Near" is learned: a horizon H, at least 21 days, equal to the 90th percentile of
+  calendar duration among tasks that started at least H days before the data end (found by
+  iteration; long tasks are weighted up, since fewer of them can have finished). `--censor-days`
+  sets it by hand.
 
 The `size` rows assume you name the final size before you start, so they are a best case. Logged
 estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40
@@ -101,6 +103,9 @@ cc-estimate init                             # writes cc-estimate.json; set repo
 ```bash
 cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
+
+A task with a commit before `--since` began outside the window, so it is dropped (the summary line
+counts these as dropped on the left) rather than given a late start.
 
 **From GitHub** (pull requests and the issues they close):
 

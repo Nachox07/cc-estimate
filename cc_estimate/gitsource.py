@@ -53,6 +53,21 @@ def merges(repo_dir, branch, since):
     return rows
 
 
+def older_keys(repo_dir, branch, since, patterns, ignore_re=None):
+    """Task keys with a commit before `since`: those tasks began outside the window, so their
+    in-window commits would give a late start and a short duration."""
+    fmt = UNIT.join(["%ae", "%s", "%b"]) + REC
+    out = subprocess.run(["git", "-C", repo_dir, "log", branch, "--no-merges", f"--until={since}", f"--format={fmt}"],
+                         capture_output=True, text=True, check=True).stdout
+    keys = set()
+    for chunk in out.split(REC):
+        if chunk.strip("\n"):
+            email, subject, body = (chunk.strip("\n").split(UNIT) + [""] * 3)[:3]
+            if not (ignore_re and ignore_re.search(email)):
+                keys.add(find_key(subject + "\n" + body, patterns))
+    return keys - {None}
+
+
 def key_patterns(spec):
     """Key regexes from config or the CLI: one string or a list; the first group is the task key."""
     spec = spec or DEFAULT_KEYS
@@ -111,13 +126,17 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     cfg = json.loads(open(a.config).read()) if a.config else {}
-    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex")),
-                          re.compile(a.ignore_authors) if a.ignore_authors else None,
-                          merged=merges(a.repo_dir, a.branch, a.since))
+    pats = key_patterns(a.key_regex or cfg.get("git", {}).get("key_regex"))
+    ignore = re.compile(a.ignore_authors) if a.ignore_authors else None
+    rows, skipped = build(commits(a.repo_dir, a.branch, a.since), pats, ignore, merged=merges(a.repo_dir, a.branch, a.since))
+    older = older_keys(a.repo_dir, a.branch, a.since, pats, ignore)
+    kept = [r for r in rows if r["id"] not in older]
+    left, rows = len(rows) - len(kept), kept
     with open_out(a.out) as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-    print(f"{len(rows)} tasks; {skipped} commits had no key and were skipped", file=sys.stderr)
+    print(f"{len(rows)} tasks; {skipped} commits had no key and were skipped; "
+          f"{left} dropped on the left (first commit before --since)", file=sys.stderr)
 
 
 if __name__ == "__main__":

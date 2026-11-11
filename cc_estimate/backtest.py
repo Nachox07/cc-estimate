@@ -109,6 +109,36 @@ def load(path, tz, cfg=None, profiles=None):
 
 
 MIN_CENSOR_DAYS = 21
+MAX_ITER = 50
+
+
+def horizon(rows, w0, data_end):
+    """Fixed point H >= MIN_CENSOR_DAYS: H is the p90 calendar duration of tasks starting by data_end - H.
+    Such a task longer than H is seen only if it started early enough, so each is weighted by the inverse
+    of that chance (starts assumed uniform over the window); unweighted, the fixed point sits below the true p90."""
+    span = (data_end - w0).total_seconds() / 86400
+    h = MIN_CENSOR_DAYS
+    for _ in range(MAX_ITER):
+        pairs = []
+        for r in rows:
+            d = (r["end"] - r["start"]).total_seconds() / 86400
+            if r["start"] <= data_end - timedelta(days=h) and d < span:
+                pairs.append((d, 1.0 if d <= h else (span - h) / (span - d)))
+        nxt = max(MIN_CENSOR_DAYS, wq(pairs, 0.9)) if pairs else MIN_CENSOR_DAYS
+        if abs(nxt - h) < 0.01:
+            return nxt
+        h = nxt
+    return h
+
+
+def wq(pairs, p):
+    """Smallest value whose cumulative weight reaches share p."""
+    pairs.sort()
+    need, acc = p * sum(w for _, w in pairs), 0.0
+    for d, w in pairs:
+        acc += w
+        if acc >= need:
+            return d
 
 
 def window(rows, since=None, censor_days=None):
@@ -120,9 +150,7 @@ def window(rows, since=None, censor_days=None):
     w0 = since or min(r["end"] for r in rows)  # a merged-in-window fetch has no end before its start
     inside = [r for r in rows if r["start"] >= w0]
     if censor_days is None:
-        mid = w0 + (data_end - w0) / 2
-        days = [(r["end"] - r["start"]).total_seconds() / 86400 for r in inside if r["start"] <= mid]
-        censor_days = max(MIN_CENSOR_DAYS, q(days, 0.9)) if days else MIN_CENSOR_DAYS
+        censor_days = horizon(inside, w0, data_end)
     cut = data_end - timedelta(days=censor_days)
     kept = [r for r in inside if r["start"] <= cut]
     return kept, dict(start=w0, cut=cut, horizon=censor_days, early=len(rows) - len(inside), late=len(inside) - len(kept))
