@@ -109,9 +109,9 @@ def split_ranges(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
     Nothing if the history has no ready_at.
 
     Waiting is the PR-level Kaplan-Meier of `bt.wait_obs` at the data's end, the same function the
-    backtest's `km wait` rows score at each task's start. Queue terciles are fitted on all history
-    here (the backtest fits them on its tuning slice so the locked slice stays unseen; an estimate has
-    no unseen slice to protect). With no queue file there is no PR-level data: waiting is then the
+    backtest's `km wait` rows score at each task's start. Queue terciles are fitted on the queues of all
+    the PRs in that population (the backtest fits them on those ready before its locked slice, so the
+    locked slice stays unseen; an estimate has no unseen slice to protect). With no queue file there is no PR-level data: waiting is then the
     finished tasks' waits, without the most recent ones, and no queue conditioning is possible."""
     queue_file = queue_file or bt.queue_path(tasks_path)
     pool = bt.load_queue(queue_file) if queue_file and Path(queue_file).is_file() else None
@@ -127,10 +127,11 @@ def split_ranges(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
     if len(pick) >= MIN_N:
         got["coding"] = [bt.q(pick, p) for p in (LO_P, 0.5, HI_P)]
         got["lines"].append(f"Coding, {label}: {span([(v, True) for v in got['coding']])}; {len(pick)} tasks.")
-    cuts = bt.tercile_cuts([r["queue"] for r in rows if r["queue"] is not None])
+    cuts = None
     if pool is not None:
         now = data_end(rows, pool, queue_file)
         pop = bt.wait_population(pool, tz, holidays, min(r["start"] for r in rows))
+        cuts = bt.fit_cuts(pop)
         count = lambda bucket=None: bt.wait_obs(pop, now, tz, holidays, bucket, cuts)
     else:
         count = lambda bucket=None: [(r["wait_y"], True) for r in recent]
@@ -155,9 +156,9 @@ def split_ranges(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
         if note:
             got["lines"].append(note)
     vals = km3(obs)
-    got["wait"] = [v for v, _ in vals]
+    got["wait"] = [v if ok else None for v, ok in vals]  # null: the data never reaches that quantile
     open_ = sum(not f for _, f in obs)
-    got["lines"].append(f"{head}: {span(vals)}; {len(obs)} waits, {open_} still open.")
+    got["lines"].append(f"{head}: {span(vals)}; {len(obs)} waits, {open_} not merged yet or closed unmerged.")
     if queue_n is None:
         got["lines"].append("  Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.")
     return got
@@ -223,7 +224,7 @@ def cmd_estimate(a, cfg):
 
 
 def rounded(vals):
-    return [round(v, 1) for v in vals] if vals else None
+    return [None if v is None else round(v, 1) for v in vals] if vals else None
 
 
 def load_log(path):
@@ -245,9 +246,10 @@ def cmd_attach(a, cfg):
     print(f"{a.id} -> PR #{a.pr}")
 
 
-READY_EVENTS = ("timelineItems(first:20,itemTypes:[READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT]){nodes{__typename "
+READY_EVENTS = ("timelineItems(first:100,itemTypes:[READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT])"
+                "{pageInfo{hasNextPage endCursor} nodes{__typename "
                 "... on ReadyForReviewEvent{createdAt} ... on ConvertToDraftEvent{createdAt}}}")
-PR_FIELDS = ("number mergedAt createdAt isDraft baseRefName commits(first:1){nodes{commit{authoredDate}}} "
+PR_FIELDS = ("id number mergedAt createdAt isDraft baseRefName commits(first:1){nodes{commit{authoredDate}}} "
              + READY_EVENTS + " " + LABEL_EVENTS)
 ISSUE_Q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){state closedAt %s
   closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{%s}}}}}""" % (LABEL_EVENTS, PR_FIELDS)
@@ -307,6 +309,9 @@ def actual_for(rec, tz, cfg):
     blocked += [sp for p in prs for sp in blocked_spans(p.get("labelEvents"), p["mergedAt"])]
     spans = [[bt.parse(x), bt.parse(y)] for x, y in blocked]
     off = bt.off_dates(cfg, rec["author"]) | bt.expand_dates(rec.get("off", []))
+    for p in prs:  # a busy PR's ready events can run past the first page, as in history.fetch
+        if (p["timelineItems"].get("pageInfo") or {}).get("hasNextPage"):
+            history.complete_connections(p, ("timelineItems",), 0)
     readies = [history.ready_instant(p, p["timelineItems"]["nodes"]) for p in prs]
     ready = min((r for r in readies if r), default=None)
     ready = min(max(ready, start), end) if ready else None
@@ -353,9 +358,12 @@ def cmd_score(a, cfg):
     print(f"Winkler (lower is better): with your size {w:.1f}, without a size {wb:.1f}.")
     for key, field, what in (("coding_h", "coding_hours", "Coding"), ("wait_h", "wait_hours", "Waiting")):
         got = [r for r in done if r.get(key) and r["actual"].get(field) is not None]
+        judged = [r for r in got if r[key][0] is not None and r[key][2] is not None]
         if got:
-            hit = sum(r[key][0] <= r["actual"][field] <= r[key][2] for r in got)
-            print(f"{what} inside its range: {hit}/{len(got)} (target 80%).")
+            hit = sum(r[key][0] <= r["actual"][field] <= r[key][2] for r in judged)
+            skipped = len(got) - len(judged)
+            print(f"{what} inside its range: " + (f"{hit}/{len(judged)} (target 80%)." if judged else "none judged.")
+                  + (f" {skipped} skipped: the data never reached the top of their range." if skipped else ""))
     if len(done) < 15:
         print("Fewer than 15 finished: too few to judge yet.")
 
