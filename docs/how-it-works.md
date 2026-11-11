@@ -3,7 +3,8 @@
 cc-estimate answers one question: **how long will this task take here?** It answers from your
 own repository's history, as a range, and keeps score of how good those ranges turn out to be.
 
-Every output below comes from a made-up history of 300 tasks by three people. Recreate it with:
+Every output below comes from a made-up history of 300 tasks by three people, drawn by
+`cc-estimate simulate --scenario size-matters`. Recreate it with:
 
 ```bash
 python3 examples/sample_history.py data/sample.tasks.jsonl
@@ -41,7 +42,7 @@ gantt
 A task file is one JSON object per line:
 
 ```json
-{"id": "DEMO-2", "title": "chore: tidy", "author": "carol", "labels": [], "start": "2026-01-05T17:00:00+00:00", "end": "2026-01-09T23:38:43.571697+00:00", "lines": 3028, "code_lines": 1556, "test_lines": 1472, "doc_lines": 0, "excluded": {}}
+{"id": "SIM-2", "title": "feat: add", "author": "user-c", "labels": [], "start": "2023-01-03T09:18:00+00:00", "end": "2023-01-19T16:45:41+00:00", "lines": 13038, "code_lines": 8538, "test_lines": 4448, "doc_lines": 52, "excluded": {}}
 ```
 
 ## Reading `backtest`
@@ -68,23 +69,23 @@ The tasks are then split in three, in time order:
 
 ```mermaid
 flowchart LR
-  H["Tasks 0-138<br/>history only"] --> T["Tasks 139-249<br/>tune: compare methods, pick one"] --> L["Tasks 250-277<br/>locked: read once, after picking"]
+  H["Tasks 0-149<br/>history only"] --> T["Tasks 150-269<br/>tune: compare methods, pick one"] --> L["Tasks 270-299<br/>locked: read once, after picking"]
 ```
 
 ```text
-dropped 22 tasks starting after 2026-06-04 (right-censoring)
+dropped 0 tasks starting after 2024-01-22 (right-censoring)
 tasks with blocked or absence time removed: 0
-test-heavy tasks (tests over 3x product code): 38
-tasks: 278  tune: [139,250)  locked: [250,278)  level=0.8  locked from 2026-05-19
-  XS n=  55  business hours p10=   0.0 p50=   9.0 p90=  18.0
-  S  n=  56  business hours p10=   2.5 p50=   9.0 p90=  18.8
-  M  n=  58  business hours p10=   6.6 p50=  18.0 p90=  27.0
-  L  n=  56  business hours p10=  20.3 p50=  45.0 p90=  70.4
-  XL n=  53  business hours p10=  63.0 p50=  97.0 p90= 134.2
+test-heavy tasks (tests over 3x product code): 48
+tasks: 300  tune: [150,270)  locked: [270,300)  level=0.8  locked from 2023-12-06
+  XS n=  63  business hours p10=   1.7 p50=   2.7 p90=   4.4
+  S  n=  51  business hours p10=   3.2 p50=   5.1 p90=   9.8
+  M  n=  60  business hours p10=   9.4 p50=  17.3 p90=  36.4
+  L  n=  61  business hours p10=  25.4 p50=  52.2 p90= 109.6
+  XL n=  65  business hours p10=  63.2 p50= 145.6 p90= 273.8
 ```
 
-The first 139 tasks are history only. Tasks 139–249 are the **tune** slice, where you may compare
-and pick methods. The last 28 are **locked**: look at them once, after choosing. The size table
+The first 150 tasks are history only. Tasks 150–269 are the **tune** slice, where you may compare
+and pick methods. The last 30 are **locked**: look at them once, after choosing. The size table
 shows the spread inside each size (size is changed product-code lines, tests and docs not counted:
 XS under 50, S under 300, M under 1,500, L under 5,000). The test-heavy count is the tasks whose test
 lines exceed three times their product-code lines; they are sized by their code, not their tests. A size with fewer than five tasks, or fewer than three people, shows only its count.
@@ -92,11 +93,15 @@ lines exceed three times their product-code lines; they are sized by their code,
 ```text
 == LOCKED · all tasks ==
   method                         n  cover  width_h medAE_h  winkler fallbk
-  baseline: repo                28   0.86     87.6    10.0    130.3   0.00
-  baseline: trailing 30d        28   0.82     94.7    12.5    132.4   0.00
-  baseline: same author         28   0.86     95.0    12.3    121.2   0.00
-  size                          28   0.89     20.7     7.0     48.1   0.00
-  size+kind                     28   0.71     21.2     8.0     57.7   0.00
+  baseline: repo                30   0.83    162.2    17.8    164.1   0.00
+  baseline: trailing 30d        30   0.80    166.6    23.4    191.1   0.00
+  baseline: same author         30   0.83    158.0    20.3    163.5   0.00
+  kind+epic                     30   0.87    168.6    19.3    167.1   0.00
+  size                          30   0.80     16.3     2.2     49.9   0.00
+  size+kind                     30   0.77     16.1     3.9     51.7   0.00
+  size+kind+epic                30   0.77     16.1     3.9     51.7   0.00
+  size+kind x pace              30   0.80     16.5     3.9     58.7   0.00
+  size+team load                30   0.77     19.4     2.2     55.4   0.00
 ```
 
 - **cover**: how often the real duration landed inside the range. Aim for about 0.80.
@@ -106,7 +111,7 @@ lines exceed three times their product-code lines; they are sized by their code,
   "narrow and right"; lower is better.
 - **fallbk**: how often a method had too few matching tasks and fell back to a simpler one.
 
-Here `size` cuts the Winkler score of every baseline by more than half at similar coverage, so on this
+Here `size` cuts the Winkler score of every baseline by about two thirds at similar coverage, so on this
 history the size is worth giving. On your history it may not be; the table tells you. Methods
 that need `classify` output (approvals, test suites) only appear when you pass `--profiles`.
 
@@ -114,12 +119,12 @@ that need `classify` output (approvals, test suites) only appear when you pass `
 
 ```text
 $ cc-estimate estimate --size L --text "add CSV export"
-Size L: 56 finished tasks in history (data up to 2026-06-25).
-80% range: 20.3-70.4 work hours (2.3-7.8 working days), median 45.0 h (5.0 d).
-Without a size: 4.8-94.8 h.
+Size L: 61 finished tasks in history (data up to 2024-02-12).
+80% range: 25.4-109.6 work hours (2.8-12.2 working days), median 52.2 h (5.8 d).
+Without a size: 2.6-162.7 h.
 ```
 
-Read it as: eight in ten L tasks here finished in 2.3 to 7.8 working days. "Without a size" is the
+Read it as: eight in ten L tasks here finished in 2.8 to 12.2 working days. "Without a size" is the
 range for any task; the gap between the two lines is what the size buys you. When a size has fewer
 than five finished tasks, `estimate` says "Not enough history for size L" and prints only the
 size-blind range. Tasks that started in the last 21 days are left out, because only the quick
@@ -147,6 +152,14 @@ your own estimates.
   repo baseline's Winkler score by at least 15% and cover 75–95%, across five random seeds. On
   histories where size has no effect, `size` must not beat the baseline by more than 5%. A method
   that always wins, or never does, fails one of the two.
+- **Known truth.** `cc-estimate simulate --scenario <name> --seed <n> --out <dir>` writes a made-up
+  `tasks.jsonl` and a `truth.json` stating the model the durations were drawn from. Durations are
+  drawn in working hours and placed on the clock at non-round minutes, so they do not pile up at 0 or 9
+  hours. The scenario tests read the last tasks (the locked slice) over seeds 7-11 and check a band, not
+  an exact number: in `size-matters` the size rows cover 70-90% and beat the baseline's Winkler score by
+  at least 15%; in `null` they land within 5% of it; in `test-heavy` each test-heavy task is sized by its
+  product code and flagged, and no other task is; in `thin` (27 S and 3 L tasks) `backtest` refuses and
+  `estimate` gives a size range for S and the size-blind range for L.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
 - **Mutation probe.** `python3 tests/mutation_probe.py` plants 28 known bugs one at a time (a
