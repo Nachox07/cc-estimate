@@ -1,13 +1,15 @@
 """Stdlib tests on synthetic data. Run: python3 -m unittest discover -s tests"""
-import contextlib, io, json, random, re, tempfile, unittest
+import contextlib, io, json, math, random, re, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import NormalDist
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 import os, subprocess
 
 from cc_estimate import backtest as bt, estimate, gitsource, links, spans, tasks
+from cc_estimate.files import read_since, write_since
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -89,7 +91,7 @@ def write(tmp, prs, lks, cfg):
     (d / "prs.jsonl").write_text("".join(json.dumps(p) + "\n" for p in prs))
     (d / "links.jsonl").write_text("".join(json.dumps(l) + "\n" for l in lks))
     (d / "cfg.json").write_text(json.dumps(cfg))
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         tasks.main(["--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"),
                     "--config", str(d / "cfg.json"), "--out", str(d / "tasks.jsonl")])
     return d
@@ -139,6 +141,73 @@ class Tasks(unittest.TestCase):
             rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
         self.assertEqual([r["prs"] for r in rows], [[1, 2]])
 
+    def test_a_task_whose_issue_had_a_pr_merged_before_the_fetch_is_dropped(self):
+        prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at="2026-10-06T12:00:00Z", first_commit_at=None, size={"lines": {"code": 1, "tests": 0, "docs": 0}},
+                    review={"rounds": 0}) for n in (1, 2)]
+        lks = [dict(number=1, base="main", excluded={}, closing=[{"number": 50, "excluded": {}, "earliest_pr_merged_at": "2026-09-20T10:00:00Z"}]),
+               dict(number=2, base="main", excluded={}, closing=[{"number": 51, "excluded": {}, "earliest_pr_merged_at": "2026-10-06T12:00:00Z"}])]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "prs.jsonl").write_text("".join(json.dumps(p) + "\n" for p in prs))
+            (d / "links.jsonl").write_text("".join(json.dumps(l) + "\n" for l in lks))
+            write_since(d / "links.jsonl", datetime(2026, 10, 1, tzinfo=UTC))
+            (d / "cfg.json").write_text("{}")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                tasks.main(["--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"), "--config", str(d / "cfg.json"),
+                            "--out", str(d / "tasks.jsonl")])
+            rows = [json.loads(l) for l in (d / "tasks.jsonl").read_text().splitlines()]
+            since = read_since(d / "tasks.jsonl")
+        self.assertEqual([r["prs"] for r in rows], [[2]])
+        self.assertIn("1 dropped on the left", out.getvalue())
+        self.assertEqual(since, datetime(2026, 10, 1, tzinfo=UTC))
+
+    def run_tasks(self, since_prs, since_links, stale=False):
+        prs = [dict(number=1, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at="2026-10-06T12:00:00Z", first_commit_at=None, size={"lines": {"code": 1, "tests": 0, "docs": 0}},
+                    review={"rounds": 0})]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "prs.jsonl").write_text(json.dumps(prs[0]) + "\n")
+            (d / "links.jsonl").write_text(json.dumps(dict(number=1, base="main", closing=[], excluded={})) + "\n")
+            (d / "cfg.json").write_text("{}")
+            if since_prs: write_since(d / "prs.jsonl", since_prs)
+            if since_links: write_since(d / "links.jsonl", since_links)
+            if stale: write_since(d / "tasks.jsonl", datetime(2020, 1, 1, tzinfo=UTC))
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                tasks.main(["--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"), "--config", str(d / "cfg.json"),
+                            "--out", str(d / "tasks.jsonl")])
+            return read_since(d / "tasks.jsonl"), err.getvalue()
+
+    def test_tasks_uses_the_later_since_and_warns_on_a_mismatch_or_a_missing_one(self):
+        a, b = datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 10, 1, tzinfo=UTC)
+        since, err = self.run_tasks(a, b)
+        self.assertEqual(since, b)
+        self.assertIn("using the later", err)
+        since, err = self.run_tasks(b, a)
+        self.assertEqual(since, b)
+        self.assertIn("using the later", err)
+        since, err = self.run_tasks(a, a)
+        self.assertNotIn("using the later", err)
+        since, err = self.run_tasks(a, None)
+        self.assertEqual(since, a)
+        self.assertIn("links file records no --since", err)
+
+    def test_a_rerun_without_a_since_clears_a_stale_sidecar(self):
+        since, _ = self.run_tasks(None, None, stale=True)
+        self.assertIsNone(since)
+
+    def test_spans_copies_the_since_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "t.jsonl").write_text(json.dumps(dict(id="X-1", excluded={})) + "\n")
+            (d / "s.csv").write_text("key,group,start,end\n")
+            write_since(d / "t.jsonl", datetime(2026, 10, 1, tzinfo=UTC))
+            spans.main(["--tasks", str(d / "t.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "o.jsonl")])
+            self.assertEqual(read_since(d / "o.jsonl"), datetime(2026, 10, 1, tzinfo=UTC))
+
     def test_a_task_ends_when_its_last_pr_merges(self):
         prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
                     merged_at=m, first_commit_at=None, size={"lines": {"code": 10, "tests": 0, "docs": 0}}, review={"rounds": 0})
@@ -162,6 +231,39 @@ class Tasks(unittest.TestCase):
 
 
 class Links(unittest.TestCase):
+    def issue_node(self, prs):
+        return dict(number=50, createdAt="2026-08-01T09:00:00Z", title="t", closedAt=None, labels={"nodes": []},
+                    closedByPullRequestsReferences={"nodes": prs}, timelineItems={"nodes": []}, labelEvents={"nodes": []})
+
+    def pr_node(self, closing):
+        return dict(number=9, baseRefName="main", headRefName="x", title="fix: y", body="", mergedAt="2026-10-06T16:00:00Z",
+                    closingIssuesReferences={"nodes": [closing]}, labelEvents={"nodes": []})
+
+    def test_an_issue_records_its_earliest_merged_closing_pr_from_this_repo(self):
+        node = self.pr_node(self.issue_node([
+            dict(number=3, mergedAt="2026-09-20T10:00:00Z", repository={"nameWithOwner": "acme/widgets"}),
+            dict(number=2, mergedAt="2026-09-10T10:00:00Z", repository={"nameWithOwner": "other/repo"}),
+            dict(number=4, mergedAt=None, repository={"nameWithOwner": "acme/widgets"}),
+            dict(number=9, mergedAt="2026-10-06T16:00:00Z", repository={"nameWithOwner": "acme/widgets"})]))
+        rec = links.record(node, {}, "main", "acme/widgets")
+        self.assertEqual(rec["closing"][0]["earliest_pr_merged_at"], "2026-09-20T10:00:00Z")
+
+    def test_closing_prs_beyond_the_first_page_are_fetched(self):
+        issue = self.issue_node([dict(number=3, mergedAt="2026-10-02T10:00:00Z", repository={"nameWithOwner": "acme/widgets"})])
+        issue["id"] = "I_1"
+        issue["closedByPullRequestsReferences"]["pageInfo"] = {"hasNextPage": True, "endCursor": "c1"}
+        page = {"data": {"node": {"closedByPullRequestsReferences": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [dict(number=2, mergedAt="2026-09-01T10:00:00Z", repository={"nameWithOwner": "acme/widgets"})]}}}}
+        with mock.patch.object(links.h, "gh_graphql", return_value=page) as g:
+            node = self.pr_node(issue)
+            links.complete_closing(issue)
+        self.assertEqual(g.call_args[0][1], {"id": "I_1", "cursor": "c1"})
+        self.assertEqual(links.record(node, {}, "main", "acme/widgets")["closing"][0]["earliest_pr_merged_at"], "2026-09-01T10:00:00Z")
+
+    def test_an_issue_with_no_merged_closing_pr_records_none(self):
+        rec = links.record(self.pr_node(self.issue_node([])), {}, "main", "acme/widgets")
+        self.assertIsNone(rec["closing"][0]["earliest_pr_merged_at"])
+
     def test_squash_suffix_is_a_cherry_pick_only_off_the_default_branch(self):
         n = dict(number=9, baseRefName="trunk", headRefName="x", title="fix: y (#3)", body="", mergedAt="2026-10-06T16:00:00Z")
         self.assertIsNone(links.record(n, {}, "trunk")["cherry_pick_of"])
@@ -262,6 +364,44 @@ class Backtest(unittest.TestCase):
                 r["y"] = 1e6  # outcomes not yet known at the start must not move the estimate
         after = bt.run(self.rows, [i], "size", 10, 0.1, 0.9)[0]
         self.assertEqual((before["width"], before["inside"]), (after["width"], after["inside"]))
+
+    def test_history_leaves_out_tasks_that_started_within_the_lag(self):
+        idx = [250]
+        self.assertTrue(bt.run(self.rows, idx, "size", 10, 0.1, 0.9))
+        self.assertEqual(bt.run(self.rows, idx, "size", 10, 0.1, 0.9, lag=10 ** 4), [])
+
+    def lag_rows(self, gap):
+        t0 = datetime(2026, 6, 20, tzinfo=UTC)
+        hist = [scored_row(t0 - timedelta(days=10) - gap + timedelta(hours=i), t0 - timedelta(hours=1), 8.0) for i in range(5)]
+        hist = [dict(r, start=t0 - timedelta(days=10) - gap) for r in hist]
+        return hist + [scored_row(t0, t0 + timedelta(days=1), 8.0)]
+
+    def test_history_lag_keeps_a_task_starting_exactly_the_lag_before_and_drops_one_just_inside(self):
+        on_edge = self.lag_rows(timedelta(0))
+        self.assertEqual(len(bt.run(on_edge, [5], "baseline: repo", 5, 0.1, 0.9, lag=10)), 1)
+        inside = self.lag_rows(-timedelta(seconds=1))
+        self.assertEqual(bt.run(inside, [5], "baseline: repo", 5, 0.1, 0.9, lag=10), [])
+
+    def lag_history(self):
+        """Steady 3-day tasks (16 h) plus 20-day ones (100 h) that only the buggy anchor leaves in the trailing sample."""
+        d0 = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [scored_row(d0 + timedelta(days=i), d0 + timedelta(days=i + 3), 16.0) for i in range(300)]
+        rows += [scored_row(d0 + timedelta(days=d), d0 + timedelta(days=d + 20), 100.0) for d in range(140, 260, 2)]
+        rows.sort(key=lambda r: r["start"])
+        return rows
+
+    def test_the_trailing_baseline_keeps_its_level_when_history_is_lagged(self):
+        rows = self.lag_history()
+        idx = [i for i, r in enumerate(rows) if r["y"] == 16.0 and r["start"] >= datetime(2026, 9, 1, tzinfo=UTC)]
+        for lag in (0, 40):
+            with self.subTest(lag=lag):
+                out = bt.run(rows, idx, "baseline: trailing 30d", 5, 0.1, 0.9, lag)
+                self.assertGreater(bt.score(out)["coverage"], 0.9)
+
+    def test_weighted_quantile_matches_the_plain_one_for_equal_weights(self):
+        xs = [3.0, 1.0, 8.0, 2.0, 9.0, 4.0, 7.0]
+        for p in (0.1, 0.5, 0.9):
+            self.assertAlmostEqual(bt.wq([(x, 1.0) for x in xs], p), bt.q(xs, p))
 
     def test_size_beats_the_plain_baseline_when_size_drives_duration(self):
         idx = list(range(200, len(self.rows)))
@@ -417,6 +557,50 @@ class Privacy(unittest.TestCase):
 
 
 class GitSource(unittest.TestCase):
+    def test_a_date_only_since_means_utc_midnight_and_a_failed_git_log_raises(self):
+        self.assertEqual(gitsource.since_epoch(".", "2026-10-01"), int(datetime(2026, 10, 1, tzinfo=UTC).timestamp()))
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(subprocess.CalledProcessError):
+                gitsource.older_keys(d, "HEAD", "@1", gitsource.key_patterns(None))
+
+    def test_a_task_begun_before_since_is_dropped_not_given_a_late_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+                   "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+            git = lambda *args, **kw: subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env={**env, **kw})
+            git("init", "-q")
+            for i, (msg, when) in enumerate([("ABC-1 start", "2026-08-03T09:00:00+02:00"), ("ABC-2 new", "2026-10-05T09:00:00+02:00"),
+                                             ("ABC-1 finish", "2026-10-06T09:00:00+02:00"), ("ABC-2 more", "2026-10-07T09:00:00+02:00")]):
+                Path(d, f"f{i}.txt").write_text("x\n")
+                git("add", ".")
+                git("commit", "-qm", msg, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+            out = Path(d, "out.jsonl")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                gitsource.main(["--repo-dir", d, "--since", "2026-10-01", "--out", str(out)])
+            ids = [json.loads(l)["id"] for l in out.read_text().splitlines()]
+            since, nothing = read_since(out), read_since(Path(d, "nothing.jsonl"))
+        self.assertEqual(ids, ["ABC-2"])
+        self.assertIn("1 dropped on the left", err.getvalue())
+        self.assertEqual(since.tzinfo, timezone.utc)
+        self.assertIsNone(nothing)
+
+    def test_older_keys_finds_only_keys_with_a_commit_before_the_edge(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
+                   "GIT_COMMITTER_NAME": "a", "GIT_COMMITTER_EMAIL": "a@example.com"}
+            git = lambda *args, **kw: subprocess.run(["git", "-C", d, *args], check=True, capture_output=True, env={**env, **kw})
+            git("init", "-q")
+            for i, (msg, when) in enumerate([("ABC-1 old", "2026-08-03T09:00:00+00:00"), ("ABC-2 old", "2026-08-04T09:00:00+00:00"),
+                                             ("ABC-3 new", "2026-10-05T09:00:00+00:00")]):
+                Path(d, f"f{i}.txt").write_text("x\n")
+                git("add", ".")
+                git("commit", "-qm", msg, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+            pats = gitsource.key_patterns(None)
+            edge = "@" + str(int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()))
+            self.assertEqual(gitsource.older_keys(d, "HEAD", edge, pats), {"ABC-1", "ABC-2"})
+            self.assertEqual(gitsource.older_keys(d, "HEAD", edge, pats, wanted={"ABC-2"}) & {"ABC-2"}, {"ABC-2"})
+
     def test_commits_with_the_same_key_make_one_task(self):
         with tempfile.TemporaryDirectory() as d:
             env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@example.com",
@@ -555,6 +739,199 @@ class OutputFiles(unittest.TestCase):
             self.assertTrue((d / "not" / "yet" / "estimates.jsonl").exists())
 
 
+class Window(unittest.TestCase):
+    """A fetch keeps PRs merged in a window, so both ends of the task list are biased."""
+    T0 = datetime(2026, 4, 1, 9, tzinfo=UTC)
+
+    def row(self, start_day, days, **kw):
+        s = self.T0 + timedelta(days=start_day)
+        return scored_row(s, s + timedelta(days=days), days * 8, **kw)
+
+    def test_a_task_that_started_before_the_earliest_end_is_dropped(self):
+        rows = [self.row(-30, 40), self.row(0, 2), self.row(5, 3), self.row(10, 1), self.row(60, 1)]
+        kept, win = bt.window(rows)
+        self.assertEqual([r["start"] for r in kept], [r["start"] for r in rows[2:4]])
+        self.assertEqual(win["early"], 2)  # the long one and the one that ends first
+
+    def test_since_sets_the_window_start(self):
+        rows = [self.row(0, 2), self.row(5, 3), self.row(10, 1), self.row(60, 1)]
+        kept, win = bt.window(rows, since=self.T0 + timedelta(days=7))
+        self.assertEqual(win["early"], 2)
+        self.assertEqual(len(kept), 1)
+
+    def test_the_horizon_never_goes_below_21_days(self):
+        rows = [self.row(d, 1) for d in range(0, 100, 5)]
+        self.assertEqual(bt.window(rows)[1]["horizon"], 21)
+
+    def test_the_horizon_grows_when_early_tasks_take_long(self):
+        rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]
+        kept, win = bt.window(rows)
+        self.assertGreater(win["horizon"], 40)
+        self.assertEqual(win["cut"], max(r["end"] for r in rows) - timedelta(days=win["horizon"]))
+        self.assertTrue(all(r["start"] <= win["cut"] for r in kept))
+
+    def lognormal_window(self, seed=1, n=40000, span=120, median=6.0, sigma=1.2, growth=0.0):
+        """Tasks start at random (a rate growing as exp(growth * t / span)) over a longer period; only those
+        that end inside [0, span] are fetched."""
+        rng, rows = random.Random(seed), []
+        for _ in range(n):
+            while True:
+                s = rng.uniform(-300, span)
+                if rng.random() <= math.exp(growth * (s - span) / span):
+                    break
+            d = median * rng.lognormvariate(0, sigma)
+            if 0 <= s + d <= span:
+                rows.append(self.row(s, d))
+        return [r for r in rows if r["start"] >= self.T0], median * math.exp(sigma * NormalDist().inv_cdf(0.9))
+
+    def first_half_horizon(self, rows):
+        """The previous rule: p90 of the tasks started in the first half of the window."""
+        w0, end = min(r["end"] for r in rows), max(r["end"] for r in rows)
+        days = [(r["end"] - r["start"]).total_seconds() / 86400 for r in rows if w0 <= r["start"] <= w0 + (end - w0) / 2]
+        return bt.q(days, 0.9)
+
+    def test_the_learned_horizon_is_near_the_true_p90_of_a_merged_in_window_fetch(self):
+        """Holds only while the window is at least ~4x the true p90 (here 120 d against 27.9 d): a task longer
+        than the window is never fetched, so a longer-tailed history reads low (next test)."""
+        errs = []
+        for seed in range(1, 6):
+            rows, true = self.lognormal_window(seed)
+            learned = bt.window(rows, since=self.T0)[1]["horizon"]
+            errs.append((abs(learned - true) / true, abs(self.first_half_horizon(rows) - true) / true))
+            self.assertLess(errs[-1][0], 0.10, (seed, learned, true))
+        self.assertLess(sum(e[0] for e in errs), sum(e[1] for e in errs))  # smaller than the first-half rule's error
+
+    def test_a_window_under_four_times_the_p90_reads_low_and_says_so(self):
+        """Documents the limit: sigma 1.8 puts the true p90 at 60 d in a 120 d window, and the horizon lands 25-40% under."""
+        rows, true = self.lognormal_window(1, sigma=1.8)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            h = bt.window(rows, since=self.T0)[1]["horizon"]
+        self.assertLess(h, 0.85 * true)
+        self.assertIn("window is too short", err.getvalue())
+
+    def test_a_well_sized_window_prints_the_horizon_and_no_warning(self):
+        rows, _ = self.lognormal_window(1)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            bt.window(rows, since=self.T0)
+        self.assertRegex(err.getvalue(), r"^horizon: [\d.]+ days \(cap 60\.0\); \d+ observed tasks above it\n$")
+
+    def test_a_realistic_history_with_a_long_tail_usually_gets_the_warning(self):
+        """~70 tasks, sigma 1.8, 120 d window: the horizon reads low, and the warning must not depend on luck."""
+        hits = 0
+        for seed in range(20):
+            rows, _ = self.lognormal_window(seed, n=300, sigma=1.8)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                bt.window(rows, since=self.T0)
+            hits += "window is too short" in err.getvalue()
+        self.assertGreaterEqual(hits, 12)
+
+    def test_a_horizon_over_half_its_cap_is_flagged_even_with_no_task_over_half_the_window(self):
+        rng = random.Random(3)
+        rows = [self.row(rng.uniform(0, 90), rng.uniform(25, 35)) for _ in range(200)] + [self.row(0, 1), self.row(119, 1)]
+        _, notes = bt.horizon(rows, self.T0, max(r["end"] for r in rows))
+        self.assertTrue(any("of its cap" in n for n in notes), notes)
+
+    def test_a_growing_start_rate_does_not_bias_the_horizon(self):
+        for seed in range(1, 7):
+            rows, true = self.lognormal_window(seed, growth=4.0)
+            learned = bt.window(rows, since=self.T0)[1]["horizon"]
+            self.assertLess(abs(learned - true) / true, 0.10, (seed, learned, true))
+
+    def test_one_long_task_in_a_small_history_does_not_set_the_horizon(self):
+        rng = random.Random(0)
+        rows = [self.row(rng.uniform(0, 100), rng.uniform(2, 6)) for _ in range(39)]
+        rows += [self.row(5, 110), self.row(0, 1)]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            kept, win = bt.window(rows, since=self.T0)
+        self.assertEqual(win["horizon"], bt.MIN_CENSOR_DAYS)
+        self.assertGreater(len(kept), 20)
+        self.assertIn("unweighted p90 is used", err.getvalue())
+
+    def test_the_horizon_is_capped_at_half_the_window(self):
+        rows = [self.row(d, 70) for d in range(0, 40, 2)] + [self.row(d, 3) for d in range(0, 100, 2)]
+        h, _ = bt.horizon(rows, self.T0, max(r["end"] for r in rows))
+        self.assertLessEqual(h, (max(r["end"] for r in rows) - self.T0).days / 2)
+
+    def test_a_two_cycle_returns_its_smaller_value_and_says_so(self):
+        rng, rows = random.Random(364), []
+        for _ in range(rng.randint(15, 60)):
+            s, d = rng.uniform(0, 150), 6 * math.exp(1.4 * rng.gauss(0, 1))
+            if s + d <= 180:
+                rows.append(self.row(s, d))
+        rows.append(self.row(0, 1))
+        h, notes = bt.horizon(rows, self.T0, max(r["end"] for r in rows))
+        self.assertTrue(any("did not settle" in n for n in notes))
+
+    def test_settle_returns_the_smallest_value_of_a_cycle(self):
+        step = {21: 40.2, 40.2: 71.2, 71.2: 55.0, 55.0: 40.2}.__getitem__
+        self.assertEqual(bt.settle(step), (40.2, False))
+        self.assertEqual(bt.settle({21: 30.0, 30.0: 30.0}.__getitem__), (30.0, True))
+
+    def test_commit_ended_tasks_do_not_set_the_horizon(self):
+        rng = random.Random(2)
+        rows = [self.row(s, d) for s, d in ((rng.uniform(0, 100), rng.uniform(2, 6)) for _ in range(300))]
+        rows += [dict(self.row(s, 50), end_kind="commit") for s in range(0, 90, 3)]
+        self.assertEqual(bt.window(rows, since=self.T0)[1]["horizon"], bt.MIN_CENSOR_DAYS)
+
+    def test_censor_days_overrides_the_learned_horizon(self):
+        rows = [self.row(0, 1)] + [self.row(d, 45) for d in range(2, 60, 3)] + [self.row(d, 1) for d in range(60, 200, 5)]
+        self.assertEqual(bt.window(rows, censor_days=30)[1]["horizon"], 30)
+        self.assertEqual(bt.window(rows, censor_days=5)[1]["horizon"], 5)
+
+    def test_backtest_reports_both_cuts_and_the_horizon(self):
+        rows = self.history()
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", rows)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bt.main(["--in", str(Path(tmp) / "t.jsonl")])
+        out = buf.getvalue()
+        self.assertRegex(out, r"dropped \d+ tasks starting before 2026-")
+        self.assertRegex(out, r"right-censoring, horizon 21\.0 days")
+
+    def test_estimate_and_backtest_cut_the_same_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", self.history())
+            loaded = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {})
+            kept, _ = bt.window(loaded)
+            with mock.patch.object(estimate.bt, "window", wraps=bt.window) as w:
+                _, n, base, _ = estimate.ranges(str(Path(tmp) / "t.jsonl"), UTC, "S", {})
+            w.assert_called_once()
+        self.assertEqual(base, [round(bt.q([r["y"] for r in kept], p), 1) for p in (0.1, 0.5, 0.9)])
+
+    def history(self, survivors=0):
+        """Normal tasks of 4-20 hours, one every 12 hours. `survivors` very long tasks
+        started long before the window and end just after it opens."""
+        rnd = random.Random(3)
+        out = []
+        for i in range(survivors):
+            s = self.T0 - timedelta(days=200 + 10 * i)
+            out.append(dict(id=-i - 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                            end=(self.T0 + timedelta(days=1 + i)).isoformat(), lines=100, excluded={}))
+        for i in range(300):
+            s = self.T0 + timedelta(hours=12 * i)
+            out.append(dict(id=i + 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                            end=(s + timedelta(hours=rnd.uniform(4, 30))).isoformat(), lines=100, excluded={}))
+        return out
+
+    def locked_coverage(self, rows):
+        lock = int(len(rows) * 0.8)
+        return bt.score(bt.run(rows, list(range(lock, len(rows))), "baseline: repo", 10, 0.1, 0.9))["coverage"]
+
+    def test_cutting_survivors_moves_locked_coverage_toward_the_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", self.history(survivors=40))
+            raw = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {})
+        cut, win = bt.window(raw)
+        self.assertGreaterEqual(win["early"], 40)
+        before, after = self.locked_coverage(raw), self.locked_coverage(cut)
+        self.assertLess(abs(after - 0.8), abs(before - 0.8))
+        self.assertGreater(before, 0.9)
+
+
 class ThinHistory(unittest.TestCase):
     def run_estimate(self, rows, *extra):
         with tempfile.TemporaryDirectory() as tmp:
@@ -576,8 +953,9 @@ class ThinHistory(unittest.TestCase):
         t0 = datetime(2026, 1, 5, tzinfo=UTC)
         rows = [scored_row(t0, t0 + timedelta(days=1), y) for y in range(81)]
         newest = [scored_row(t0 + timedelta(days=200), t0 + timedelta(days=200), 0)]  # moves the censor cut-off
+        first = [scored_row(t0 - timedelta(days=3), t0 - timedelta(days=2), 0)]  # its end opens the window
         with mock.patch.object(Path, "exists", return_value=True), \
-                mock.patch.object(estimate.bt, "load", return_value=rows + newest):
+                mock.patch.object(estimate.bt, "load", return_value=first + rows + newest):
             sized, n, base, _ = estimate.ranges("t.jsonl", UTC, "S", {})
         self.assertEqual(sized, [8.0, 40.0, 72.0])
 

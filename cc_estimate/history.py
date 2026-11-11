@@ -27,7 +27,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from .files import open_out
+from .files import open_out, write_since
 
 HERE = Path(__file__).resolve().parent
 
@@ -581,6 +581,7 @@ def cmd_fetch(a):
     print(json.dumps(meta), file=sys.stderr)
     if a.out:
         Path(a.out).with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
+        write_since(a.out, datetime(since.year, since.month, since.day, tzinfo=timezone.utc))
 
 
 CI_Q = """query($id: ID!, $cursor: String, $n: Int!) {

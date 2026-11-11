@@ -124,8 +124,16 @@ Without a size: 4.8-94.8 h.
 Read it as: eight in ten L tasks here finished in 2.3 to 7.8 working days. "Without a size" is the
 range for any task; the gap between the two lines is what the size buys you. When a size has fewer
 than five finished tasks, `estimate` says "Not enough history for size L" and prints only the
-size-blind range. Tasks that started in the last 21 days are left out, because only the quick
-ones among them have finished.
+size-blind range. `estimate` applies the same two cuts as `backtest`. Tasks that started
+before the earliest task end are left out, because only the long-lived ones of those are in the
+file. Tasks that started within the last stretch of the data are left out too, because only the quick
+ones among them have finished. That stretch is the horizon H: the 90th percentile of calendar
+duration among tasks that started at least H days before the data end (found by iteration), never
+less than 21 days and never more than max(21, half the window). Long tasks are weighted up by the chance they
+had finished, taken from the observed start times. It is valid when the window is at least about 4x
+the true 90th percentile; on a shorter one it reads low. `backtest` and `estimate` print H, its cap and the count of
+observed tasks above it, and warn when H reaches half its cap; the warning is a heuristic and can miss. The window start is
+the `--since` that `git-tasks` recorded beside the tasks file (`tasks` and `spans` write one too), else the earliest task end.
 
 With a `classifier` in the config, `--paths` adds what the change will go through, for example
 which approval groups and test suites the paths trigger. That is context; it does not change the
@@ -151,10 +159,10 @@ your own estimates.
   that always wins, or never does, fails one of the two.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 28 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
-  probe is not failing everything. All 28 are caught.
+  probe is not failing everything. All are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 

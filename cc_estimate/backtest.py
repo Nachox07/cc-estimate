@@ -9,9 +9,12 @@ As-of inputs: title kind, epic label, author. `size` rows assume a perfect plann
 names the final size bucket in advance, so they are an upper bound for what a planned size buys.
 """
 import argparse, json, sys, statistics as st
+from bisect import bisect_right
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from .files import read_since
 
 DAY0, DAY1 = 9, 18
 BUCKETS = ((50, "XS"), (300, "S"), (1500, "M"), (5000, "L"), (10 ** 12, "XL"))
@@ -103,7 +106,7 @@ def load(path, tz, cfg=None, profiles=None):
         start, end = parse(r["start"]), parse(r["end"])
         blocked = [[parse(x), parse(y)] for spans in (r.get("excluded") or {}).values() for x, y in spans]
         off = off_dates(cfg or {}, r["author"])
-        rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
+        rows.append(dict(id=r["id"], start=start, end=end, end_kind=r.get("end_kind"), y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
                          kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r.get("code_lines", r["lines"])),
                          test_heavy=r.get("test_lines", 0) > TEST_HEAVY * r.get("code_lines", r["lines"]),
@@ -114,6 +117,114 @@ def load(path, tz, cfg=None, profiles=None):
     rows.sort(key=lambda x: x["start"])
     add_load(rows)
     return rows
+
+
+MIN_CENSOR_DAYS = 21
+MAX_ITER = 50
+MIN_ABOVE = 3      # observed tasks above the p90 needed to trust the weights
+HEAVY_CAP_SHARE = 0.5  # H/cap of 0.5 is the window = 4x p90 limit; above it H reads low
+HEAVY_SHARE = 0.05  # weight share of tasks longer than half the window that triggers a warning
+
+
+def horizon(rows, w0, data_end):
+    """Fixed point H >= MIN_CENSOR_DAYS: H is the p90 calendar duration of tasks starting by data_end - H.
+    Such a task longer than H is seen only if it started early enough, so it is weighted by 1 / F(data_end - d),
+    F being the start-time CDF of the tasks not longer than H (all of them seen); unweighted, the fixed point
+    sits below the true p90. Valid while the window is at least ~4x the true p90: a task longer than the whole
+    window is never fetched. H is capped at max(21, half the window). Returns (H, notes); the first note is
+    always the summary line."""
+    span = (data_end - w0).total_seconds() / 86400
+    pts = sorted(((r["start"] - w0).total_seconds() / 86400, (r["end"] - r["start"]).total_seconds() / 86400) for r in rows)
+    cap = max(MIN_CENSOR_DAYS, span / 2)
+
+    def sample(h, weighted):
+        mine = [(s, d) for s, d in pts if s <= span - h]
+        short = [s for s, d in mine if d <= h]
+        out = []
+        for s, d in mine:
+            w = 1.0
+            if weighted and d > h:
+                f = bisect_right(short, span - d) / len(short) if short else 0
+                if f <= 0:
+                    continue
+                w = 1 / f
+            out.append((d, w))
+        return out
+
+    def step(weighted):
+        def go(h):
+            pairs = sample(h, weighted)
+            return round(min(cap, max(MIN_CENSOR_DAYS, wq(pairs, 0.9))), 2) if pairs else MIN_CENSOR_DAYS
+        return go
+
+    notes = []
+    wh, ok = settle(step(True))
+    wpairs = sample(wh, True)
+    h, pairs = wh, wpairs
+    if sum(d > h for d, _ in pairs) < MIN_ABOVE:
+        h, ok = settle(step(False))
+        pairs = sample(h, False)
+        notes.append(f"horizon: fewer than {MIN_ABOVE} observed tasks above the weighted p90, so the unweighted p90 is used")
+    notes.insert(0, f"horizon: {h:.1f} days (cap {cap:.1f}); {sum(d > h for d, _ in pairs)} observed tasks above it")
+    if not ok:
+        notes.append(f"horizon: the iteration did not settle; using {h:.1f} days")
+    if wh >= cap - 0.01:
+        notes.append(f"horizon: the weighted horizon hit its cap of {cap:.1f} days")
+    short = ("the window is too short for this history, so the horizon is probably too low")
+    total = sum(w for _, w in wpairs)
+    if wh >= HEAVY_CAP_SHARE * cap:
+        notes.append(f"horizon: the weighted horizon {wh:.1f} days is at least {HEAVY_CAP_SHARE:.0%} of its cap; {short}")
+    elif total and sum(w for d, w in wpairs if d > span / 2) / total > HEAVY_SHARE:
+        notes.append(f"horizon: tasks longer than half the window carry much of the weight; {short}")
+    return h, notes
+
+
+def settle(step, h=MIN_CENSOR_DAYS):
+    """Iterate h -> step(h) to a fixed point. On a cycle, return its smallest value and False."""
+    seen = []
+    for _ in range(MAX_ITER):
+        nxt = step(h)
+        if abs(nxt - h) < 0.01:
+            return nxt, True
+        if nxt in seen:
+            return min(seen[seen.index(nxt):]), False
+        seen.append(nxt)
+        h = nxt
+    return h, False
+
+
+def wq(pairs, p):
+    """Weighted quantile with q()'s interpolation (equal weights give the same value as q)."""
+    pairs = sorted(pairs)
+    if len(pairs) == 1:
+        return pairs[0][0]
+    tot, before = sum(w for _, w in pairs) - pairs[-1][1], 0.0
+    pos = []
+    for d, w in pairs:
+        pos.append((before / tot, d)); before += w
+    for (p0, d0), (p1, d1) in zip(pos, pos[1:]):
+        if p <= p1:
+            return d0 + (d1 - d0) * (p - p0) / (p1 - p0) if p1 > p0 else d1
+    return pos[-1][1]
+
+
+def window(rows, since=None, censor_days=None):
+    """Cut both edges of a merged-in-window fetch. Before the window only long-lived tasks are
+    present; near its end only fast ones are. Returns (kept, info) with the window start, cut, horizon and drop counts."""
+    if not rows:
+        return [], None
+    data_end = max(r["end"] for r in rows)
+    w0 = since or min(r["end"] for r in rows)  # a merged-in-window fetch has no end before its start
+    inside = [r for r in rows if r["start"] >= w0]
+    notes = []
+    if censor_days is None:
+        merge_ended = [r for r in inside if r.get("end_kind") != "commit"]  # commit-ended tasks are cut short, not absent
+        censor_days, notes = horizon(merge_ended or inside, w0, data_end)
+        for n in notes:
+            print(n, file=sys.stderr)
+    cut = data_end - timedelta(days=censor_days)
+    kept = [r for r in inside if r["start"] <= cut]
+    return kept, dict(start=w0, cut=cut, horizon=censor_days, early=len(rows) - len(inside), late=len(inside) - len(kept), notes=notes)
 
 
 def add_load(rows):
@@ -146,7 +257,8 @@ def match(keys):
 
 
 def trailing(h, t):
-    cut = t["start"] - timedelta(days=30)
+    """Tasks that ended in the 30 days before the lagged cut (`ref`), which is t's start when there is no lag."""
+    cut = t.get("ref", t["start"]) - timedelta(days=30)
     return [x["y"] for x in h if x["end"] >= cut]
 
 
@@ -216,12 +328,15 @@ def estimate(h, t, name, k_min, lo_p, hi_p):
     return q(s, lo_p) * f, q(s, 0.5) * f, q(s, hi_p) * f, fell
 
 
-def run(rows, idx, name, k_min, lo_p, hi_p):
+def run(rows, idx, name, k_min, lo_p, hi_p, lag=0):
+    """`lag` days: history leaves out tasks that started that recently, as the live estimate does."""
     out, alpha = [], 1 - (hi_p - lo_p)
     for i in idx:
         t = rows[i]
         h = [x for x in rows[:i] if x["end"] <= t["start"]]
-        e = estimate(h, t, name, k_min, lo_p, hi_p)
+        if lag:
+            h = [x for x in h if x["start"] <= t["start"] - timedelta(days=lag)]
+        e = estimate(h, dict(t, ref=t["start"] - timedelta(days=lag)), name, k_min, lo_p, hi_p)
         if not e:
             continue
         lo, med, hi, fell = e
@@ -260,16 +375,16 @@ def main(argv=None):
     ap.add_argument("--level", type=float, default=0.8)
     ap.add_argument("--config")
     ap.add_argument("--profiles", help="profiles jsonl from classify.py")
-    ap.add_argument("--censor-days", type=int, default=21,
-                    help="drop tasks starting this close to the data end: their slow siblings are still open")
+    ap.add_argument("--censor-days", type=float,
+                    help="drop tasks starting this close to the data end: their slow siblings are still open "
+                         "(default: learned from the data, at least 21)")
+    ap.add_argument("--since", help="start of the fetched window, YYYY-MM-DD (default: the one git-tasks recorded, else the earliest task end)")
     a = ap.parse_args(argv)
     profiles = {p["id"]: p for p in map(json.loads, Path(a.profiles).read_text().splitlines())} if a.profiles else {}
     cfg = json.loads(Path(a.config).read_text()) if a.config else {}
     rows = load(a.inp, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), cfg, profiles)
-    data_end = max((r["end"] for r in rows), default=None)
-    cut = data_end - timedelta(days=a.censor_days) if data_end else None
-    dropped = sum(r["start"] > cut for r in rows) if cut else 0
-    rows = [r for r in rows if r["start"] <= cut] if cut else []
+    since = datetime.fromisoformat(a.since).replace(tzinfo=ZoneInfo(a.tz or cfg.get("timezone", "UTC"))) if a.since else read_since(a.inp)
+    rows, win = window(rows, since, a.censor_days)
     n = len(rows)
     s = split(n, a.min_history)
     if not s:
@@ -278,7 +393,8 @@ def main(argv=None):
     first, lock = s
     bucket_load(rows, rows[:lock])
     lo_p, hi_p = (1 - a.level) / 2, 1 - (1 - a.level) / 2
-    print(f"dropped {dropped} tasks starting after {cut:%Y-%m-%d} (right-censoring)")
+    print(f"dropped {win['early']} tasks starting before {win['start']:%Y-%m-%d} (left-truncation: only long-lived ones reach the window)")
+    print(f"dropped {win['late']} tasks starting after {win['cut']:%Y-%m-%d} (right-censoring, horizon {win['horizon']:.1f} days)")
     nb = sum(r["y"] < r["y_raw"] - 0.01 for r in rows)
     print(f"tasks with blocked or absence time removed: {nb}")
     print(f"test-heavy tasks (tests over {TEST_HEAVY}x product code): {sum(r['test_heavy'] for r in rows)}")
@@ -293,7 +409,7 @@ def main(argv=None):
     strata = {"all tasks": lambda t: True, "planned M+": lambda t: t["size"] in ("M", "L", "XL"),
               "planned L+": lambda t: t["size"] in ("L", "XL")}
     for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, n))):
-        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p) for name in METHODS
+        results = {name: run(rows, list(idx), name, a.k_min, lo_p, hi_p, win["horizon"]) for name in METHODS
                    if profiles or name not in NEEDS_PROFILES}  # without classify output they repeat other rows
         for sname, keep in strata.items():
             print(f"\n== {label} · {sname} ==")

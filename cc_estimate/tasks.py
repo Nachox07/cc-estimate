@@ -6,10 +6,11 @@ Body references ("Refs #N") are not used: most cite umbrella issues or rules.
 Release-branch PRs are carries of work already counted on main and are dropped.
 Bot and automation authors are dropped.
 """
-import argparse, json, re
+import argparse, json, re, sys
 from pathlib import Path
 from collections import defaultdict
-from .files import open_out
+from datetime import datetime
+from .files import open_out, read_since, write_since
 
 
 def main(argv=None):
@@ -37,8 +38,21 @@ def main(argv=None):
         closing = sorted(i["number"] for i in links.get(n, {}).get("closing", []))
         groups[("issue", closing[0]) if closing else ("pr", n)].append(n)
 
+    sp, sl = read_since(a.prs), read_since(a.links)
+    if sl is None:
+        print("warning: the links file records no --since, so tasks whose first PR merged before the window are kept", file=sys.stderr)
+    if sp and sl and sp != sl:
+        print(f"warning: prs were fetched since {sp:%Y-%m-%d} but links since {sl:%Y-%m-%d}; using the later", file=sys.stderr)
+    since = max((x for x in (sp, sl) if x), default=None)
+    when = lambda t: datetime.fromisoformat(t.replace("Z", "+00:00"))
+    # A PR merged before the fetch window is absent, so its task would start at a later PR.
+    early = {root for root, ns in groups.items() if since and any(
+        i.get("earliest_pr_merged_at") and when(i["earliest_pr_merged_at"]) < since
+        for n in ns for i in links.get(n, {}).get("closing", []))}
     with open_out(a.out) as f:
         for root, ns in groups.items():
+            if root in early:
+                continue
             ns.sort(key=lambda n: prs[n]["created_at"])
             first = prs[ns[0]]
             starts = [prs[n]["created_at"] for n in ns] + [prs[n]["first_commit_at"] for n in ns if prs[n].get("first_commit_at")]
@@ -60,8 +74,11 @@ def main(argv=None):
                 excluded=excluded,
                 review_rounds=sum(prs[n]["review"]["rounds"] for n in ns),
             )) + "\n")
-    multi = sum(len(v) > 1 for v in groups.values())
-    print(f"{len(keep)} PRs -> {len(groups)} tasks ({multi} with >1 PR)")
+    write_since(a.out, since)
+    multi = sum(len(v) > 1 for k, v in groups.items() if k not in early)
+    print(f"{len(keep)} PRs -> {len(groups) - len(early)} tasks ({multi} with >1 PR); "
+          f"{len(early)} dropped on the left (a closing PR merged before {since:%Y-%m-%d})" if early else
+          f"{len(keep)} PRs -> {len(groups)} tasks ({multi} with >1 PR)")
 
 
 if __name__ == "__main__":
