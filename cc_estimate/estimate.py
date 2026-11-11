@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from . import backtest as bt
 from . import classify as cl
 from . import gitsource as gs
+from . import history
 from .links import LABEL_EVENTS, blocked_spans
 from .files import open_out
 
@@ -103,47 +104,67 @@ def data_end(rows, pool, queue_file):
     return max([r["end"] for r in rows] + [t for p in pool for t in (p["ready"], p["closed"]) if t])
 
 
-def split_lines(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
-    """Coding and waiting ranges, as lines to print; none if the history has no ready_at."""
+def split_ranges(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
+    """Coding and waiting ranges: {"lines": [...], "coding": [lo, med, hi] or None, "wait": ... or None}.
+    Nothing if the history has no ready_at.
+
+    Waiting is the PR-level Kaplan-Meier of `bt.wait_obs` at the data's end, the same function the
+    backtest's `km wait` rows score at each task's start. Queue terciles are fitted on all history
+    here (the backtest fits them on its tuning slice so the locked slice stays unseen; an estimate has
+    no unseen slice to protect). With no queue file there is no PR-level data: waiting is then the
+    finished tasks' waits, without the most recent ones, and no queue conditioning is possible."""
     queue_file = queue_file or bt.queue_path(tasks_path)
     pool = bt.load_queue(queue_file) if queue_file and Path(queue_file).is_file() else None
+    holidays = bt.holiday_dates(cfg)
     rows = [r for r in bt.load(tasks_path, tz, cfg, None, pool) if r["wait_y"] is not None]
+    got = dict(lines=[], coding=None, wait=None)
     if not rows:
-        return []
+        return got
     newest = max(r["end"] for r in rows)
     recent = [r for r in rows if r["start"] <= newest - timedelta(days=CENSOR_DAYS)]
     same = [r["coding_y"] for r in recent if r["size"] == size]
     pick, label = (same, f"size {size}") if len(same) >= MIN_N else ([r["coding_y"] for r in recent], "any size")
-    out = []
     if len(pick) >= MIN_N:
-        vals = [(bt.q(pick, p), True) for p in (LO_P, 0.5, HI_P)]
-        out.append(f"Coding, {label}: {span(vals)}; {len(pick)} tasks.")
-    # Open PRs are known only from the queue file; with them nothing needs dropping for recency.
-    done, open_ = (rows, []) if pool is not None else (recent, [])
+        got["coding"] = [bt.q(pick, p) for p in (LO_P, 0.5, HI_P)]
+        got["lines"].append(f"Coding, {label}: {span([(v, True) for v in got['coding']])}; {len(pick)} tasks.")
     cuts = bt.tercile_cuts([r["queue"] for r in rows if r["queue"] is not None])
     if pool is not None:
-        end = data_end(rows, pool, queue_file)
-        open_ = [(bt.biz_hours(p["ready"], p["closed"] or end, tz),
-                  bt.queue_at(pool, p["ready"], p["reviewers"], {p["number"]})[0])
-                 for p in pool if p["ready"] and not p["merged"]]
-    bucket = None
-    if queue_n is not None and cuts:
+        now = data_end(rows, pool, queue_file)
+        pop = bt.wait_population(pool, tz, holidays, min(r["start"] for r in rows))
+        count = lambda bucket=None: bt.wait_obs(pop, now, tz, holidays, bucket, cuts)
+    else:
+        count = lambda bucket=None: [(r["wait_y"], True) for r in recent]
+    note = ""
+    if queue_n is not None and cuts and pool is not None:
         bucket = bt.tercile(queue_n, cuts)
-        obs = [(r["wait_y"], True) for r in done if r["queue"] is not None and bt.tercile(r["queue"], cuts) == bucket]
-        if len(obs) >= MIN_N:
-            obs += [(d, False) for d, qv in open_ if bt.tercile(qv, cuts) == bucket]
-            out.append(f"Waiting for review, with {queue_n} PRs already waiting on your reviewers "
-                       f"({bucket} queue on this repo): {span(km3(obs))}; {len(obs)} PRs, "
-                       f"{sum(not ok for _, ok in obs)} still open.")
-            return out
-        out.append(f"Not enough history for a {bucket} reviewer queue; waiting for review at any queue:")
+        obs = count(bucket)
+        if sum(f for _, f in obs) >= MIN_N:
+            head = (f"Waiting for review, with {queue_n} PRs already waiting on your reviewers "
+                    f"({bucket} queue on this repo)")
+        else:
+            note = f"Not enough history for a {bucket} reviewer queue; waiting for review at any queue:"
+            obs = None
     elif queue_n is not None:
-        out.append("No queue file, so the waiting range cannot follow the queue. Waiting for review at any queue:")
-    obs = [(r["wait_y"], True) for r in done] + [(d, False) for d, _ in open_]
-    out.append(f"Waiting for review, any queue: {span(km3(obs))}; {len(obs)} PRs, {len(open_)} still open.")
+        note = "No queue file, so the waiting range cannot follow the queue. Waiting for review at any queue:"
+        obs = None
+    else:
+        obs = None
+    if obs is None:
+        obs = count()
+        head = "Waiting for review, any queue"
+        if note:
+            got["lines"].append(note)
+    vals = km3(obs)
+    got["wait"] = [v for v, _ in vals]
+    open_ = sum(not f for _, f in obs)
+    got["lines"].append(f"{head}: {span(vals)}; {len(obs)} waits, {open_} still open.")
     if queue_n is None:
-        out.append("  Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.")
-    return out
+        got["lines"].append("  Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.")
+    return got
+
+
+def split_lines(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
+    return split_ranges(tasks_path, tz, size, cfg, queue_n, queue_file)["lines"]
 
 
 def print_needs(paths, cfg):
@@ -185,7 +206,8 @@ def cmd_estimate(a, cfg):
         lo, med, hi = base
         print(f"Not enough history for size {a.size}. Without a size: {lo}-{hi} work hours "
               f"({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
-    for line in split_lines(a.tasks, tz, a.size, cfg, a.queue, a.queue_file):
+    parts = split_ranges(a.tasks, tz, a.size, cfg, a.queue, a.queue_file)
+    for line in parts["lines"]:
         print(line)
     if a.paths:
         print_needs(a.paths, cfg)
@@ -193,10 +215,15 @@ def cmd_estimate(a, cfg):
         return
     rec = dict(id=uuid.uuid4().hex[:8], at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                author=me(cfg), repo=cfg.get("repo", "local/repo"), size=a.size, issue=issue, text=a.text, pr=None,
-               range_h=[lo, med, hi], baseline_h=base, n=n, sized=bool(sized), off=a.off or [], actual=None)
+               range_h=[lo, med, hi], baseline_h=base, n=n, sized=bool(sized), off=a.off or [], actual=None,
+               coding_h=rounded(parts["coding"]), wait_h=rounded(parts["wait"]), queue=a.queue)
     with open_out(a.log_file, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print(f"Logged as {rec['id']}." + ("" if a.issue else f" No issue given: run `cc-estimate attach {rec['id']} --pr <N>` once the PR exists."))
+
+
+def rounded(vals):
+    return [round(v, 1) for v in vals] if vals else None
 
 
 def load_log(path):
@@ -218,7 +245,10 @@ def cmd_attach(a, cfg):
     print(f"{a.id} -> PR #{a.pr}")
 
 
-PR_FIELDS = "number mergedAt createdAt baseRefName commits(first:1){nodes{commit{authoredDate}}} " + LABEL_EVENTS
+READY_EVENTS = ("timelineItems(first:20,itemTypes:[READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT]){nodes{__typename "
+                "... on ReadyForReviewEvent{createdAt} ... on ConvertToDraftEvent{createdAt}}}")
+PR_FIELDS = ("number mergedAt createdAt isDraft baseRefName commits(first:1){nodes{commit{authoredDate}}} "
+             + READY_EVENTS + " " + LABEL_EVENTS)
 ISSUE_Q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){state closedAt %s
   closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{%s}}}}}""" % (LABEL_EVENTS, PR_FIELDS)
 PR_Q = """query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){%s}}}""" % PR_FIELDS
@@ -277,8 +307,13 @@ def actual_for(rec, tz, cfg):
     blocked += [sp for p in prs for sp in blocked_spans(p.get("labelEvents"), p["mergedAt"])]
     spans = [[bt.parse(x), bt.parse(y)] for x, y in blocked]
     off = bt.off_dates(cfg, rec["author"]) | bt.expand_dates(rec.get("off", []))
+    readies = [history.ready_instant(p, p["timelineItems"]["nodes"]) for p in prs]
+    ready = min((r for r in readies if r), default=None)
+    ready = min(max(ready, start), end) if ready else None
     return dict(hours=round(bt.biz_hours(start, end, tz, off, spans), 1),
                 hours_raw=round(bt.biz_hours(start, end, tz), 1),
+                coding_hours=round(bt.biz_hours(start, ready, tz, off, spans), 1) if ready else None,
+                wait_hours=round(bt.biz_hours(ready, end, tz, bt.holiday_dates(cfg)), 1) if ready else None,
                 start=start.isoformat(), end=end.isoformat(), prs=[p["number"] for p in prs])
 
 
@@ -316,6 +351,11 @@ def cmd_score(a, cfg):
     wb = sum(winkler(r["baseline_h"][0], r["baseline_h"][2], r["actual"]["hours"]) for r in done) / len(done)
     print(f"Inside the range: {inside}/{len(done)} (target 80%).")
     print(f"Winkler (lower is better): with your size {w:.1f}, without a size {wb:.1f}.")
+    for key, field, what in (("coding_h", "coding_hours", "Coding"), ("wait_h", "wait_hours", "Waiting")):
+        got = [r for r in done if r.get(key) and r["actual"].get(field) is not None]
+        if got:
+            hit = sum(r[key][0] <= r["actual"][field] <= r[key][2] for r in got)
+            print(f"{what} inside its range: {hit}/{len(got)} (target 80%).")
     if len(done) < 15:
         print("Fewer than 15 finished: too few to judge yet.")
 

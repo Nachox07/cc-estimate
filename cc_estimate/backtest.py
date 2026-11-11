@@ -97,6 +97,11 @@ def off_dates(cfg, login):
     return frozenset(expand_dates(ab.get("*", []) + ab.get(login, [])))
 
 
+def holiday_dates(cfg):
+    """Public holidays only (the `*` absence rows): waiting for review runs on nobody's personal calendar."""
+    return frozenset(expand_dates((cfg.get("absence") or {}).get("*", [])))
+
+
 def expand_dates(items):
     out = set()
     for it in items:
@@ -126,24 +131,37 @@ def reviewer_times(items):
 
 
 def load_queue(path):
-    """The all-PRs file (`fetch-queue`), times parsed. A PR with no ready_at is still a draft."""
-    return [dict(number=r["number"], ready=parse(r["ready_at"]) if r.get("ready_at") else None,
-                 closed=parse(r["closed_at"]) if r.get("closed_at") else None, merged=r.get("state") == "MERGED",
-                 reviewers=reviewer_times(r.get("reviewers")))
-            for r in map(json.loads, Path(path).read_text().splitlines())]
+    """The all-PRs file (`fetch-queue`), times parsed. A PR with no ready_at is still a draft.
+    `asked`: each reviewer's earliest request. `reviewers`: every (who, requested, done) entry."""
+    out = []
+    for r in map(json.loads, Path(path).read_text().splitlines()):
+        entries = [(x["who"], parse(x["at"]), parse(x["done_at"]) if x.get("done_at") else None)
+                   for x in r.get("reviewers") or []]
+        out.append(dict(number=r["number"], ready=parse(r["ready_at"]) if r.get("ready_at") else None,
+                        closed=parse(r["closed_at"]) if r.get("closed_at") else None, merged=r.get("state") == "MERGED",
+                        reviewers=entries, asked=reviewer_times(r.get("reviewers"))))
+    return out
 
 
 def queue_path(tasks_path):
-    """`x.tasks.jsonl` goes with `x.queue.jsonl`; any other name has no default."""
+    """`x.tasks.jsonl` goes with `x.queue.jsonl`, and `tasks.jsonl` with `queue.jsonl` (what `simulate`
+    writes); any other name has no default."""
     p = Path(tasks_path)
+    if p.name == "tasks.jsonl":
+        return p.with_name("queue.jsonl")
     return p.with_name(p.name[:-len(".tasks.jsonl")] + ".queue.jsonl") if p.name.endswith(".tasks.jsonl") else None
 
 
-def queue_at(pool, ready, reviewers, skip=()):
-    """PRs waiting for review at `ready`, as known at that instant: (on the same reviewers, repo-wide).
-    Only requests made by `ready` count, for this PR and for the others, and a PR counts as waiting
-    until the moment it merged or closed. With no reviewer known yet the repo-wide count stands in."""
-    who = {w for w, at in reviewers.items() if at <= ready}
+REQUEST_GRACE = timedelta(minutes=5)  # CODEOWNERS requests land about a second after a PR opens
+
+
+def queue_at(pool, ready, asked, skip=()):
+    """PRs in the same reviewers' queue at `ready`, as known at that instant: (on the same reviewers,
+    repo-wide). GitHub's meaning of `--review-requested X`: a PR is in X's queue from X's request
+    until X submits a review (a team: until any human does), or it merges or closes; drafts are not.
+    Requests up to REQUEST_GRACE after `ready` count as made at ready, for this PR and for the others.
+    With no reviewer known yet the repo-wide count (ready, not merged or closed) stands in."""
+    who = {w for w, at in asked.items() if at <= ready + REQUEST_GRACE}
     same = repo = 0
     for p in pool:
         if p["number"] in skip or p["ready"] is None or p["ready"] > ready:
@@ -151,7 +169,8 @@ def queue_at(pool, ready, reviewers, skip=()):
         if p["closed"] is not None and p["closed"] <= ready:
             continue
         repo += 1
-        same += any(at <= ready and w in who for w, at in p["reviewers"].items())
+        same += any(w in who and at <= ready + REQUEST_GRACE and (done is None or done > ready)
+                    for w, at, done in p["reviewers"])
     return (same if who else repo), repo
 
 
@@ -161,9 +180,41 @@ def add_queue(rows, pool):
             t["queue"], t["queue_repo"] = queue_at(pool, t["ready"], t["reviewers"], set(t["prs"]))
 
 
+def wait_population(pool, tz, holidays, since):
+    """One PR-level population for the waiting curve, on one clock (working hours, public holidays
+    off): every PR in the queue file that became ready on or after `since` (the tasks file's first
+    start; the queue file reaches back earlier only to count PRs already waiting). Each carries the
+    reviewer queue it joined and, if it merged, its wait."""
+    out = []
+    for p in pool:
+        if p["ready"] is None or p["ready"] < since:
+            continue
+        q = queue_at(pool, p["ready"], p["asked"], {p["number"]})[0]
+        wait = biz_hours(p["ready"], p["closed"], tz, holidays) if p["merged"] and p["closed"] else None
+        out.append(dict(ready=p["ready"], closed=p["closed"], merged=p["merged"], queue=q, wait=wait))
+    return out
+
+
+def wait_obs(pop, now, tz, holidays, bucket=None, cuts=None):
+    """(hours, finished) pairs as known at `now`. A merged PR is a finished wait. A PR ready and not yet
+    closed at `now` is still waiting, so it stays in as unfinished, censored at `now`; if it later
+    merged or closed unmerged, `now` does not know that. A PR closed unmerged by `now` is left out:
+    the curve is time to merge, for work that merges. With `bucket`, only PRs whose queue falls in it."""
+    obs = []
+    for p in pop:
+        if p["ready"] > now or (bucket and tercile(p["queue"], cuts) != bucket):
+            continue
+        if p["closed"] is None or p["closed"] > now:
+            obs.append((biz_hours(p["ready"], now, tz, holidays), False))
+        elif p["merged"]:
+            obs.append((p["wait"], True))
+    return obs
+
+
 def load(path, tz, cfg=None, profiles=None, pool=None):
     """Task rows. A task with `ready_at` also gets its working hours split at that instant:
-    `coding_y` (start to ready) and `wait_y` (ready to end), on the same clock and exclusions as `y`.
+    `coding_y` (start to ready, minus the author's time off and blocked spans, as `y`) and `wait_y`
+    (ready to end, minus public holidays only: reviewers' calendars are not the author's).
     With `pool` (the all-PRs file) it gets the reviewer queue it faced at ready."""
     profiles = profiles or {}
     rows, old = [], 0
@@ -173,11 +224,12 @@ def load(path, tz, cfg=None, profiles=None, pool=None):
         blocked = [[parse(x), parse(y)] for spans in (r.get("excluded") or {}).values() for x, y in spans]
         off = off_dates(cfg or {}, r["author"])
         ready = min(max(parse(r["ready_at"]), start), end) if r.get("ready_at") else None
+        holidays = holiday_dates(cfg or {})
         rows.append(dict(id=r["id"], start=start, end=end, y=biz_hours(start, end, tz, off, blocked),
                          y_raw=biz_hours(start, end, tz), author=r["author"],
                          ready=ready, prs=r.get("prs") or [], reviewers=reviewer_times(r.get("reviewers")),
                          coding_y=biz_hours(start, ready, tz, off, blocked) if ready else None,
-                         wait_y=biz_hours(ready, end, tz, off, blocked) if ready else None,
+                         wait_y=biz_hours(ready, end, tz, holidays) if ready else None,
                          queue=None, queue_repo=None,
                          kind=title_kind(r["title"]), epic=epic(r["labels"]), size=bucket(r.get("code_lines", r["lines"])),
                          test_heavy=r.get("test_lines", 0) > TEST_HEAVY * r.get("code_lines", r["lines"]),
@@ -252,7 +304,8 @@ METHODS = {
     "queue": match(["queue_b"]),
     "size+queue": match(["size", "queue_b"]),
 }
-SPLIT_ONLY = ("queue", "size+queue")  # scored on the WAIT table, not on total cycle time
+KM_METHODS = ("km wait", "km wait+queue")  # need the PR-level population, not task rows
+SPLIT_ONLY = ("queue", "size+queue") + KM_METHODS  # scored on the WAIT table, not on total cycle time
 # On too few matches, fall back down this chain before the trailing-30-day baseline.
 FALLBACK = {"profile+size": ["approvals+size", "size"], "approvals+size": ["size"], "e2e+size": ["size"],
             "size+team load": ["size"], "size+group load": ["size"], "size+queue": ["queue", "size"]}
@@ -303,12 +356,29 @@ def estimate(h, t, name, k_min, lo_p, hi_p):
     return q(s, lo_p) * f, q(s, 0.5) * f, q(s, hi_p) * f, fell
 
 
-def run(rows, idx, name, k_min, lo_p, hi_p):
+def km_estimate(ctx, t, name, k_min, lo_p, hi_p):
+    """The waiting range `estimate` prints, as it would have stood at the task's start: Kaplan-Meier over
+    PRs finished by then plus PRs ready and still open then. The `queue` variant keeps only PRs whose
+    queue fell in the task's bucket, and falls back to all of them on fewer than k_min finished waits."""
+    cond = name.endswith("queue") and t.get("queue_b") is not None
+    obs = wait_obs(ctx["pop"], t["start"], ctx["tz"], ctx["holidays"], t["queue_b"] if cond else None, ctx["cuts"])
+    fell = name.endswith("queue") and (not cond or sum(f for _, f in obs) < k_min)
+    if fell:
+        obs = wait_obs(ctx["pop"], t["start"], ctx["tz"], ctx["holidays"])
+    if sum(f for _, f in obs) < 5:
+        return None
+    return (*(km_quantile(obs, p)[0] for p in (lo_p, 0.5, hi_p)), fell)
+
+
+def run(rows, idx, name, k_min, lo_p, hi_p, ctx=None):
     out, alpha = [], 1 - (hi_p - lo_p)
     for i in idx:
         t = rows[i]
-        h = [x for x in rows[:i] if x["end"] <= t["start"]]
-        e = estimate(h, t, name, k_min, lo_p, hi_p)
+        if name in KM_METHODS:
+            e = km_estimate(ctx, t, name, k_min, lo_p, hi_p)
+        else:
+            h = [x for x in rows[:i] if x["end"] <= t["start"]]
+            e = estimate(h, t, name, k_min, lo_p, hi_p)
         if not e:
             continue
         lo, med, hi, fell = e
@@ -391,16 +461,18 @@ def main(argv=None):
         for sname, keep in strata.items():
             print(f"\n== {label} · {sname} ==")
             table(results, keep)
-    split_tables(rows, a, lo_p, hi_p, pool is not None)
+    split_tables(rows, a, lo_p, hi_p, pool, ZoneInfo(a.tz or cfg.get("timezone", "UTC")), holiday_dates(cfg))
 
 
 CODING_METHODS = ("baseline: repo", "baseline: same author", "size")
 WAIT_METHODS = CODING_METHODS + SPLIT_ONLY
 
 
-def split_tables(rows, a, lo_p, hi_p, have_queue):
+def split_tables(rows, a, lo_p, hi_p, pool, tz, holidays):
     """The same scoring on coding time and on waiting time, for tasks that carry `ready_at`.
-    Terciles of the queue are fitted on this table's tuning slice only."""
+    Terciles of the queue are fitted on this table's tuning slice only. The `km wait` rows score what
+    `estimate` prints, on PRs as known at each task's start; `queue`/`size+queue` use task rows."""
+    have_queue = pool is not None
     part = [r for r in rows if r["wait_y"] is not None]
     if not part:
         return
@@ -411,12 +483,14 @@ def split_tables(rows, a, lo_p, hi_p, have_queue):
     first, lock = s
     bucket_load(part, part[:lock])
     queued = have_queue and any(r["queue"] is not None for r in part)
+    ctx = dict(tz=tz, holidays=holidays, cuts=tercile_cuts([r["queue"] for r in part[:lock] if r["queue"] is not None]),
+               pop=wait_population(pool, tz, holidays, min(r["start"] for r in rows)) if queued else [])
     print(f"\ncoding and waiting: {len(part)} tasks carry ready_at; tune: [{first},{lock})  locked: [{lock},{len(part)})"
           + ("" if queued else "  (no queue file: queue rows left out)"))
     for label, idx in (("TUNE", range(first, lock)), ("LOCKED", range(lock, len(part)))):
         for title, key, names in (("CODING", "coding_y", CODING_METHODS), ("WAIT", "wait_y", WAIT_METHODS)):
             view = [dict(r, y=r[key]) for r in part]
-            results = {n: run(view, list(idx), n, a.k_min, lo_p, hi_p) for n in names if queued or n not in SPLIT_ONLY}
+            results = {n: run(view, list(idx), n, a.k_min, lo_p, hi_p, ctx) for n in names if queued or n not in SPLIT_ONLY}
             print(f"\n== {label} · {title} ==")
             table(results, lambda t: True)
 
