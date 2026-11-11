@@ -37,6 +37,15 @@ M = [
  ("tasks.py", 'end=max(prs[n]["merged_at"] for n in ns)', 'end=min(prs[n]["merged_at"] for n in ns)', "task ends at first PR merge, not last"),
  ("tasks.py", 'groups[("issue", closing[0]) if closing else ("pr", n)].append(n)', 'groups[("pr", n)].append(n)', "PRs closing one issue not grouped"),
  ("history.py", 'return len(rs) >= MIN_CELL and len({r.get("author") for r in rs}) >= MIN_AUTHORS', 'return True', "summary shows small groups"),
+ ("backtest.py", 'at <= max(now, p["ready"] + REQUEST_GRACE) and (done', '(done', "queue counts reviewer requests made after ready"),
+ ("backtest.py", 'obs.append((biz_hours(p["ready"], now, tz, holidays), False))', 'pass', "wait range drops the PRs still open"),
+ ("backtest.py", 'wait_y=biz_hours(ready, end, tz, holidays) if ready else None,', 'wait_y=biz_hours(ready, end, tz, off, blocked) if ready else None,', "wait subtracts the author's time off and blocked spans"),
+ ("backtest.py", 'REQUEST_GRACE = timedelta(minutes=5)', 'REQUEST_GRACE = timedelta(0)', "a reviewer request a second after ready is not known at ready"),
+ ("backtest.py", '(done is None or done > now)', 'True', "a PR stays in a reviewer's queue after that reviewer answered"),
+ ("backtest.py", 'p["ready"] < since or p["bot"]', 'p["bot"]', "wait curve reaches back before the tasks file"),
+ ("backtest.py", 'if p["number"] in skip or p["ready"] is None or p["ready"] > now:', 'if p["number"] in skip or p["ready"] is None or p["ready"] > now or p["bot"]:', "bot-authored PRs left out of the reviewer queue"),
+ ("backtest.py", 't["queue"], t["queue_repo"] = queue_at(pool, t["start"], who, skip)', 't["queue"], t["queue_repo"] = queue_at(pool, t["ready"], who, skip)', "queue rows use the queue at ready, which a planner does not have at the start"),
+ ("backtest.py", '            obs.append((p["wait"], False))', '            pass', "PR closed unmerged is dropped instead of censored at its close"),
  ("files.py", 'def open_out', '# control\ndef open_out', "control: no behaviour change (must survive)"),
 ]
 rows = []

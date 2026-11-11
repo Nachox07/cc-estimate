@@ -5,6 +5,7 @@ Generic: works on any GitHub repo the `gh` CLI can read. Repo- and team-specific
 settings live in a JSON config file (see `cc-estimate init`). Stdlib only.
 
   python3 history.py fetch   --repo OWNER/NAME [--days 120] [--config cfg.json] [--out prs.jsonl]
+  python3 history.py fetch-queue --repo OWNER/NAME [--days 120] [--out queue.jsonl]   # every PR by created date
   python3 history.py ci      --repo OWNER/NAME --prs 12,34 [--in prs.jsonl]   # expensive CI detail
   python3 history.py summary --in prs.jsonl [--out summary.md]
 
@@ -191,22 +192,38 @@ CONN = {
     "comments": ("comments(first: 100{after}) { totalCount pageInfo { hasNextPage endCursor } nodes { "
                  "author { __typename login } createdAt } }"),
     "timelineItems": ("timelineItems(first: 100{after}, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, "
-                      "HEAD_REF_FORCE_PUSHED_EVENT]) { pageInfo { hasNextPage endCursor } nodes { __typename "
+                      "HEAD_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) "
+                      "{ pageInfo { hasNextPage endCursor } "
+                      "nodes { __typename "
                       "... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } "
-                      "... on HeadRefForcePushedEvent { createdAt } } }"),
+                      "... on HeadRefForcePushedEvent { createdAt } "
+                      "... on ReviewRequestedEvent { createdAt requestedReviewer { __typename "
+                      "... on User { login } ... on Team { slug organization { login } } } } "
+                      "... on ReviewRequestRemovedEvent { createdAt requestedReviewer { __typename "
+                      "... on User { login } ... on Team { slug organization { login } } } } } }"),
 }
 LABELS = "labels(first: 50) { nodes { name } }"
 PR_FIELDS = ("id number title url author { __typename login } baseRefName createdAt mergedAt isDraft "
              "additions deletions changedFiles " + LABELS + " "
              + " ".join(c.replace("{after}", "") for c in CONN.values()))
 
-SEARCH_Q = """query($q: String!, $n: Int!, $cursor: String) {
+# The queue file needs only who, when and what state: no files or commits.
+QUEUE_FIELDS = ("id number author { __typename login } createdAt mergedAt closedAt state isDraft "
+                + " ".join(CONN[c].replace("{after}", "") for c in ("reviews", "timelineItems")))
+
+
+def search_q(fields):
+    return """query($q: String!, $n: Int!, $cursor: String) {
   rateLimit { cost remaining resetAt }
   search(query: $q, type: ISSUE, first: $n, after: $cursor) {
     issueCount pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest { %s } }
   }
-}""" % PR_FIELDS
+}""" % fields
+
+
+SEARCH_Q = search_q(PR_FIELDS)
+QUEUE_SEARCH_Q = search_q(QUEUE_FIELDS)
 
 COUNT_Q = """query($q: String!) { rateLimit { cost remaining resetAt } search(query: $q, type: ISSUE, first: 1) { issueCount } }"""
 
@@ -221,14 +238,14 @@ def continuation_q(conn: str) -> str:
             + CONN[conn].replace("{after}", ", after: $cursor") + " } } }")
 
 
-def complete_connections(node: dict) -> dict:
-    for conn in CONN:
+def complete_connections(node: dict, conns=tuple(CONN), ttl_s: float | None = None) -> dict:
+    for conn in conns:
         c = node.get(conn) or {}
         nodes = list(c.get("nodes") or [])
         pi = c.get("pageInfo") or {}
         pages = 0
         while pi.get("hasNextPage") and pages < 50:
-            d = gh_graphql(continuation_q(conn), {"id": node["id"], "cursor": pi["endCursor"]}, f"cont_{conn}")
+            d = gh_graphql(continuation_q(conn), {"id": node["id"], "cursor": pi["endCursor"]}, f"cont_{conn}", ttl_s)
             cc = d["data"]["node"][conn]
             nodes.extend(cc["nodes"])
             pi = cc["pageInfo"]
@@ -239,20 +256,23 @@ def complete_connections(node: dict) -> dict:
     return node
 
 
-def search_window(repo: str, since: date, until: date, page: int, ttl: float | None) -> tuple[dict, list]:
-    """All PRs merged in [since, until] (dates inclusive), bisecting over the ~1000 cap."""
-    q = f"repo:{repo} is:pr is:merged merged:{since.isoformat()}..{until.isoformat()}"
+def search_window(repo: str, since: date, until: date, page: int, ttl: float | None,
+                  queue: bool = False) -> tuple[dict, list]:
+    """All PRs merged (or, for the queue file, created: any state) in [since, until], dates
+    inclusive, bisecting over the ~1000 cap."""
+    span = f"{since.isoformat()}..{until.isoformat()}"
+    q = f"repo:{repo} is:pr created:{span}" if queue else f"repo:{repo} is:pr is:merged merged:{span}"
     count = gh_graphql(COUNT_Q, {"q": q}, "count", ttl)["data"]["search"]["issueCount"]
     if count > 900 and since < until:
         mid = since + (until - since) // 2
-        a, sa = search_window(repo, since, mid, page, ttl)
-        b, sb = search_window(repo, mid + timedelta(days=1), until, page, ttl)
+        a, sa = search_window(repo, since, mid, page, ttl, queue)
+        b, sb = search_window(repo, mid + timedelta(days=1), until, page, ttl, queue)
         a.update(b)
         return a, sa + sb
     out: dict[int, dict] = {}
     cursor = None
     while True:
-        d = gh_graphql(SEARCH_Q, {"q": q, "n": page, "cursor": cursor}, "search", ttl)
+        d = gh_graphql(QUEUE_SEARCH_Q if queue else SEARCH_Q, {"q": q, "n": page, "cursor": cursor}, "search", ttl)
         s = d["data"]["search"]
         for n in s["nodes"]:
             if n and n.get("number"):
@@ -381,6 +401,78 @@ def cluster_count(times: list[datetime], minutes: int) -> int:
 # ----------------------------------------------------------------------------- per-PR record
 
 
+def ready_instant(n: dict, tl: list) -> datetime | None:
+    """When the PR first became reviewable: its creation if it was opened ready (even if later turned
+    back into a draft), else its first ready-for-review event, else None (a draft still)."""
+    kinds = lambda t: sorted(ts(e["createdAt"]) for e in tl if e.get("__typename") == t)
+    ready, drafted = kinds("ReadyForReviewEvent"), kinds("ConvertToDraftEvent")
+    if drafted and (not ready or drafted[0] < ready[0]):
+        return ts(n["createdAt"])
+    if ready:
+        return ready[0]
+    return None if n.get("isDraft") else ts(n["createdAt"])
+
+
+def reviewer_list(n: dict, author: str | None, cc: dict) -> list[dict]:
+    """Who was asked to review, and for how long it stayed on them. Each entry is a request time
+    (`at`, users and teams, from review-request events) and `done_at`, when that reviewer next
+    submitted a review (a team: when any human did, which ends a team's request early) or the request
+    was removed, or null while it still waits. A later request
+    made while an earlier one is open adds nothing; one made after a review starts a new entry. Humans
+    who reviewed unasked get an entry that starts and ends at their first review."""
+    asked: dict[str, list[datetime]] = {}
+    removed: dict[str, list[datetime]] = {}
+    for e in n["timelineItems"]["nodes"]:
+        r = e.get("requestedReviewer") or {}
+        kind = e.get("__typename")
+        if kind not in ("ReviewRequestedEvent", "ReviewRequestRemovedEvent"):
+            continue
+        if r.get("__typename") == "Team" and r.get("slug"):
+            who = f"team:{(r.get('organization') or {}).get('login', '')}/{r['slug']}"
+        elif r.get("__typename") == "User" and r.get("login") != author and not is_bot(r, cc):
+            who = f"user:{r['login']}"
+        else:
+            continue
+        (asked if kind == "ReviewRequestedEvent" else removed).setdefault(who, []).append(ts(e["createdAt"]))
+    subs: dict[str, list[datetime]] = {}
+    for r in n["reviews"]["nodes"]:
+        a = r.get("author")
+        if r.get("submittedAt") and a and a.get("login") != author and not is_bot(a, cc):
+            subs.setdefault(f"user:{a['login']}", []).append(ts(r["submittedAt"]))
+    anyone = sorted(t for v in subs.values() for t in v)
+    out = []
+    for who, times in asked.items():
+        ends = sorted((subs.get(who, []) if who.startswith("user:") else anyone) + removed.get(who, []))
+        open_until = None  # the end of the entry just opened; None = still open
+        for t in sorted(times):
+            if out and out[-1][0] == who and (open_until is None or t < open_until):
+                continue
+            open_until = next((x for x in ends if x > t), None)
+            out.append((who, t, open_until))
+    for who, v in subs.items():
+        if who not in asked:
+            out.append((who, min(v), min(v)))
+    out.sort(key=lambda e: (e[1], e[0]))
+    return [{"who": w, "at": t.isoformat(), "done_at": d.isoformat() if d else None} for w, t, d in out]
+
+
+def build_queue_record(n: dict, cfg: dict, cc: dict) -> dict:
+    """One PR in any state, for measuring how many were waiting on reviewers at a given time.
+    Bot-opened PRs are kept, flagged `bot_author`: they sit in reviewers' real queues (dependabot with
+    CODEOWNERS requests); tasks skip them. No author or title is kept."""
+    author = n.get("author") or {}
+    tl = n["timelineItems"]["nodes"]
+    ready_at = ready_instant(n, tl)
+    human = sorted(ts(r["submittedAt"]) for r in n["reviews"]["nodes"]
+                   if r.get("submittedAt") and (r.get("author") or {}).get("login") != author.get("login")
+                   and not is_bot(r.get("author"), cc))
+    return {"number": n["number"], "state": n["state"], "created_at": n["createdAt"],
+            "ready_at": ready_at.isoformat() if ready_at else None,
+            "first_review_at": human[0].isoformat() if human else None, "bot_author": is_bot(author, cc),
+            "closed_at": n.get("mergedAt") or n.get("closedAt"),
+            "reviewers": reviewer_list(n, author.get("login"), cc)}
+
+
 def build_record(n: dict, cfg: dict, cc: dict) -> dict:
     author = (n.get("author") or {}).get("login")
     created, merged = ts(n["createdAt"]), ts(n["mergedAt"])
@@ -413,8 +505,8 @@ def build_record(n: dict, cfg: dict, cc: dict) -> dict:
     active_days = sorted(d for d in own_days if is_workday(d, off))
 
     # ready-for-review instant (coding phase end)
-    ready_events = sorted(ts(e["createdAt"]) for e in tl if e.get("__typename") == "ReadyForReviewEvent")
-    ready = ready_events[0] if ready_events else created
+    ready = ready_instant(n, tl) or created
+    reviewers = reviewer_list(n, author, cc)
 
     # reviews
     rev = sorted((r for r in reviews if r.get("submittedAt")), key=lambda r: r["submittedAt"])
@@ -469,6 +561,8 @@ def build_record(n: dict, cfg: dict, cc: dict) -> dict:
         "number": n["number"], "title": n["title"], "url": n.get("url"), "author": author,
         "labels": [l["name"] for l in n["labels"]["nodes"]], "base": n["baseRefName"],
         "created_at": n["createdAt"], "merged_at": n["mergedAt"],
+        "ready_at": ready.isoformat(), "first_review_at": first_human.isoformat() if first_human else None,
+        "reviewers": reviewers,
         "first_commit_at": first_commit.isoformat() if first_commit else None,
         "last_commit_at": last_commit.isoformat() if last_commit else None,
         "size": {"additions": n["additions"], "deletions": n["deletions"], "changed_files": n["changedFiles"],
@@ -581,6 +675,28 @@ def cmd_fetch(a):
     print(json.dumps(meta), file=sys.stderr)
     if a.out:
         Path(a.out).with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
+
+
+def cmd_fetch_queue(a):
+    """Every PR created in the window, open and closed-unmerged included, to measure the reviewer
+    queue. Written apart from `fetch`: it is never used as history, only to count who was waiting."""
+    cfg = load_config(a.config)
+    cc = compile_cfg(cfg)
+    until = date.fromisoformat(a.until) if a.until else datetime.now(timezone.utc).date()
+    since = date.fromisoformat(a.since) if a.since else until - timedelta(days=a.days)
+    nodes, shortfalls = search_window(a.repo, since, until, cfg["search_page_size"], 3600, queue=True)
+    print(f"fetched {len(nodes)} PR nodes; completing connections...", file=sys.stderr)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as ex:
+        done = list(ex.map(lambda num: complete_connections(nodes[num], ("reviews", "timelineItems"), 3600),
+                           sorted(nodes)))
+    recs = [build_queue_record(node, cfg, cc) for node in done]
+    with open_out(a.out) as out:
+        for rec in recs:
+            out.write(json.dumps(rec) + "\n")
+    meta = {"repo": a.repo, "since": str(since), "until": str(until), "prs": len(recs), "shortfalls": shortfalls,
+            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    Path(a.out).with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"{len(recs)} PRs written to {a.out}.")
 
 
 CI_Q = """query($id: ID!, $cursor: String, $n: Int!) {
@@ -749,6 +865,13 @@ def main(argv=None):
     f.add_argument("--out", required=True)
     f.add_argument("--include", type=int, nargs="*", help="extra PR numbers to fetch even if outside the window")
     f.add_argument("--workers", type=int, default=6)
+    q = sp.add_parser("fetch-queue")
+    q.add_argument("--repo", required=True)
+    q.add_argument("--days", type=int, default=120)
+    q.add_argument("--since"); q.add_argument("--until")
+    q.add_argument("--config")
+    q.add_argument("--out", required=True)
+    q.add_argument("--workers", type=int, default=6)
     c = sp.add_parser("ci")
     c.add_argument("--repo", required=True); c.add_argument("--prs", required=True)
     c.add_argument("--in", dest="inp", required=True)
@@ -757,7 +880,7 @@ def main(argv=None):
     s.add_argument("--out")
     a = p.parse_args(argv)
     CACHE_DIR = Path(a.cache_dir)
-    {"fetch": cmd_fetch, "ci": cmd_ci, "summary": cmd_summary}[a.cmd](a)
+    {"fetch": cmd_fetch, "fetch-queue": cmd_fetch_queue, "ci": cmd_ci, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

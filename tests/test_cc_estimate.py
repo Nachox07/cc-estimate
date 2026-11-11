@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import os, subprocess
 
-from cc_estimate import backtest as bt, estimate, gitsource, links, simulate, spans, tasks
+from cc_estimate import backtest as bt, estimate, gitsource, history, links, simulate, spans, tasks
 
 MAD = ZoneInfo("Europe/Madrid")
 UTC = timezone.utc
@@ -75,13 +75,26 @@ def synthetic(n=400, seed=7, size_matters=True):
         merged = created + timedelta(hours=drives / 40 * rnd.uniform(0.5, 2.0) + rnd.uniform(0, 30))
         author = LOGINS[i % 3] if i % 50 else "release-bot[bot]"
         base = "main" if i % 40 else "release/1.0"
+        asked = (created + timedelta(hours=1)).isoformat()
         prs.append(dict(number=i, title=rnd.choice(["feat: x", "fix: y", "chore: z"]), author=author, labels=[],
                         base=base, created_at=created.isoformat(), merged_at=merged.isoformat(),
                         first_commit_at=created.isoformat(), size={"lines": {"code": lines, "tests": 0, "docs": 0}},
-                        review={"rounds": 1}))
+                        review={"rounds": 1}, ready_at=(created + timedelta(hours=2)).isoformat(),
+                        first_review_at=(created + timedelta(hours=5)).isoformat(),
+                        reviewers=[dict(who=f"user:{LOGINS[(i + 1) % 3]}", at=asked), dict(who="team:acme/core", at=asked)]))
         issue = 1000 + (i // 2 if i % 10 == 0 else i)  # every 10th PR shares an issue with the one before
         lks.append(dict(number=i, base=base, closing=[{"number": issue, "excluded": {}}], excluded={}))
     return prs, lks
+
+
+def synthetic_queue(prs):
+    """The all-PRs file for `synthetic`: every PR as merged, plus a few still open."""
+    rows = [dict(number=p["number"], state="MERGED", created_at=p["created_at"], ready_at=p["ready_at"],
+                 first_review_at=p["first_review_at"], closed_at=p["merged_at"], reviewers=p["reviewers"]) for p in prs]
+    late = prs[-1]["created_at"]
+    rows += [dict(number=9000 + k, state="OPEN", created_at=late, ready_at=late, first_review_at=None, closed_at=None,
+                  reviewers=[dict(who=f"user:{LOGINS[k % 3]}", at=late)]) for k in range(6)]
+    return rows
 
 
 def write(tmp, prs, lks, cfg):
@@ -171,7 +184,8 @@ class Links(unittest.TestCase):
 class Scoring(unittest.TestCase):
     def test_scoring_uses_the_configured_default_branch(self):
         pr = {"number": 5, "mergedAt": "2026-10-06T16:00:00Z", "createdAt": "2026-10-05T09:00:00Z",
-              "baseRefName": "trunk", "commits": {"nodes": []}, "labelEvents": {"nodes": []}}
+              "baseRefName": "trunk", "commits": {"nodes": []}, "labelEvents": {"nodes": []},
+              "isDraft": False, "timelineItems": {"nodes": []}}
         rec = {"repo": "acme/widgets", "pr": 5, "author": "alice"}
         with mock.patch.object(estimate, "gql", return_value={"pullRequest": pr}):
             got = estimate.actual_for(rec, MAD, {"default_branch": "trunk"})
@@ -693,14 +707,17 @@ class EveryCommandPrivacy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             d = write(tmp, *synthetic(), {"repo": "acme/widgets", "timezone": "Europe/Madrid", "data_dir": "."})
             (d / "widgets.tasks.jsonl").write_text((d / "tasks.jsonl").read_text())
+            simulate.write_rows(synthetic_queue(synthetic()[0]), d / "widgets.queue.jsonl")
             (d / "h.jsonl").write_text("".join(json.dumps(r) + "\n" for r in history_records()))
             (d / "s.csv").write_text("key,group,start,end\n1,blocked,2026-06-01T10:00:00Z,2026-06-01T12:00:00Z\n")
             cfg = str(d / "cfg.json")
             commands = {
                 "tasks": ["tasks", "--prs", str(d / "prs.jsonl"), "--links", str(d / "links.jsonl"), "--config", cfg, "--out", str(d / "t2.jsonl")],
                 "spans": ["spans", "--tasks", str(d / "tasks.jsonl"), "--csv", str(d / "s.csv"), "--out", str(d / "t3.jsonl")],
-                "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg],
+                "backtest": ["backtest", "--in", str(d / "tasks.jsonl"), "--config", cfg,
+                             "--queue", str(d / "widgets.queue.jsonl")],
                 "estimate": ["estimate", "--size", "M", "--config", cfg],
+                "estimate with queue": ["estimate", "--size", "M", "--queue", "4", "--config", cfg],
                 "summary": ["summary", "--in", str(d / "h.jsonl")],
                 "git-tasks": ["git-tasks", "--repo-dir", str(Path(__file__).resolve().parents[1]), "--since", "10 years ago",
                               "--out", str(d / "g.jsonl")],
@@ -712,6 +729,12 @@ class EveryCommandPrivacy(unittest.TestCase):
                         cli(args)
                     for login in LOGINS:
                         self.assertNotIn(login, buf.getvalue())
+                    # the reviewer data was really read, not skipped
+                    if name == "backtest":
+                        self.assertIn("LOCKED · WAIT", buf.getvalue())
+                    if name.startswith("estimate"):
+                        self.assertIn("Waiting for review", buf.getvalue())
+                    self.assertNotIn("team:", buf.getvalue())
                     if name == "summary":  # a PR number leads straight to its author
                         self.assertNotRegex(buf.getvalue(), r"#\d")
 
@@ -819,3 +842,710 @@ class SimulatedScenarios(unittest.TestCase):
                 small = self.run_main(estimate.main, [*args, "--size", "S"])
                 self.assertIn("80% range:", small)
                 self.assertNotIn("Not enough history", small)
+
+
+def pr_node(**kw):
+    """A GraphQL PR node as `fetch` receives it, with empty connections."""
+    n = dict(id="PR_x", number=1, title="feat: a", url="u", author={"__typename": "User", "login": "alice"},
+             baseRefName="main", createdAt="2026-10-05T09:00:00Z", mergedAt="2026-10-07T09:00:00Z", closedAt=None,
+             state="MERGED", isDraft=False, additions=1, deletions=1, changedFiles=1, labels={"nodes": []},
+             files={"nodes": []}, commits={"nodes": []}, reviews={"nodes": []}, comments={"nodes": []},
+             timelineItems={"nodes": []})
+    n.update(kw)
+    return n
+
+
+def requested(at, kind, name, org="acme"):
+    who = {"__typename": "User", "login": name} if kind == "user" else \
+        {"__typename": "Team", "slug": name, "organization": {"login": org}}
+    return {"__typename": "ReviewRequestedEvent", "createdAt": at, "requestedReviewer": who}
+
+
+def review(who, at, state="COMMENTED", typename="User"):
+    return {"author": {"__typename": typename, "login": who}, "state": state, "submittedAt": at,
+            "commit": {"oid": "c1"}, "comments": {"totalCount": 0}}
+
+
+class ReviewTiming(unittest.TestCase):
+    """What `fetch` and `fetch-queue` keep about review timing, and what `tasks` carries on."""
+
+    def setUp(self):
+        self.cfg = history.load_config(None)
+        self.cc = history.compile_cfg(self.cfg)
+
+    def timed_node(self, **kw):
+        tl = [{"__typename": "ReadyForReviewEvent", "createdAt": "2026-10-05T12:00:00Z"},
+              requested("2026-10-05T13:00:00Z", "user", "bob"), requested("2026-10-05T14:00:00Z", "team", "core"),
+              requested("2026-10-05T15:00:00Z", "user", "ci[bot]"), requested("2026-10-05T15:30:00Z", "user", "alice"),
+              requested("2026-10-05T16:00:00Z", "user", "bob")]
+        rv = [review("bob", "2026-10-06T09:00:00Z"), review("carol", "2026-10-06T10:00:00Z", "APPROVED"),
+              review("reviewbot", "2026-10-05T12:30:00Z", typename="Bot")]
+        return pr_node(timelineItems={"nodes": tl}, reviews={"nodes": rv}, **kw)
+
+    def test_a_pr_record_keeps_the_instants_and_who_was_asked(self):
+        rec = history.build_record(self.timed_node(), self.cfg, self.cc)
+        self.assertEqual((rec["ready_at"], rec["first_review_at"], rec["merged_at"]),
+                         ("2026-10-05T12:00:00+00:00", "2026-10-06T09:00:00+00:00", "2026-10-07T09:00:00Z"))
+        # earliest request wins; a team is kept whole; a bot, the author and a bot review are not reviewers;
+        # carol reviewed unasked, so her first review is when she became involved
+        self.assertEqual([(r["who"], r["at"]) for r in rec["reviewers"]],
+                         [("user:bob", "2026-10-05T13:00:00+00:00"), ("team:acme/core", "2026-10-05T14:00:00+00:00"),
+                          ("user:carol", "2026-10-06T10:00:00+00:00")])
+
+    def test_each_request_ends_when_that_reviewer_answers_and_a_team_when_any_human_does(self):
+        rec = history.build_record(self.timed_node(), self.cfg, self.cc)
+        done = {r["who"]: r["done_at"] for r in rec["reviewers"]}
+        self.assertEqual(done["user:bob"], "2026-10-06T09:00:00+00:00")
+        self.assertEqual(done["team:acme/core"], "2026-10-06T09:00:00+00:00")
+        self.assertEqual(done["user:carol"], "2026-10-06T10:00:00+00:00")  # unasked: starts and ends at the review
+
+    def test_a_request_after_a_review_starts_a_new_entry_and_one_while_open_adds_nothing(self):
+        tl = [requested("2026-10-05T10:00:00Z", "user", "bob"), requested("2026-10-05T10:30:00Z", "user", "bob"),
+              requested("2026-10-06T10:00:00Z", "user", "bob")]
+        node = pr_node(timelineItems={"nodes": tl}, reviews={"nodes": [review("bob", "2026-10-05T12:00:00Z")]})
+        rec = history.build_record(node, self.cfg, self.cc)
+        self.assertEqual([(r["at"], r["done_at"]) for r in rec["reviewers"]],
+                         [("2026-10-05T10:00:00+00:00", "2026-10-05T12:00:00+00:00"), ("2026-10-06T10:00:00+00:00", None)])
+
+    def test_a_pr_opened_ready_and_later_turned_into_a_draft_was_ready_when_opened(self):
+        drafted = {"__typename": "ConvertToDraftEvent", "createdAt": "2026-10-05T11:00:00Z"}
+        ready = {"__typename": "ReadyForReviewEvent", "createdAt": "2026-10-05T13:00:00Z"}
+        for tl in ([drafted], [drafted, ready]):
+            node = pr_node(state="OPEN", isDraft=True, mergedAt=None, timelineItems={"nodes": tl})
+            self.assertEqual(history.build_queue_record(node, self.cfg, self.cc)["ready_at"], "2026-10-05T09:00:00+00:00")
+        node = pr_node(state="OPEN", isDraft=True, mergedAt=None, timelineItems={"nodes": [ready]})
+        self.assertEqual(history.build_queue_record(node, self.cfg, self.cc)["ready_at"], "2026-10-05T13:00:00+00:00")
+
+    def test_fetch_queue_completes_connections_on_a_pool_of_workers_and_writes_every_pr(self):
+        nodes = {n: pr_node(number=n, state="OPEN", mergedAt=None) for n in (3, 1, 2)}
+        a = mock.Mock(repo="o/r", days=10, since="2026-10-01", until="2026-10-09", config=None, workers=3)
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(history, "search_window", return_value=(nodes, [])), \
+                mock.patch.object(history, "complete_connections", side_effect=lambda n, *_: n) as cc:
+            a.out = f"{tmp}/q.jsonl"
+            history.cmd_fetch_queue(a)
+            got = [json.loads(l)["number"] for l in Path(a.out).read_text().splitlines()]
+        self.assertEqual(got, [1, 2, 3])
+        self.assertEqual(cc.call_count, 3)
+
+    def test_a_pr_never_marked_ready_is_ready_when_opened(self):
+        rec = history.build_record(pr_node(), self.cfg, self.cc)
+        self.assertEqual((rec["ready_at"], rec["first_review_at"], rec["reviewers"]), ("2026-10-05T09:00:00+00:00", None, []))
+
+    def test_review_requests_are_read_from_the_timeline_and_paged_with_it(self):
+        self.assertIn("REVIEW_REQUESTED_EVENT", history.CONN["timelineItems"])
+        self.assertIn("ReviewRequestedEvent", history.continuation_q("timelineItems"))
+
+    def test_the_queue_record_covers_open_closed_and_draft_prs_and_keeps_no_author(self):
+        draft = pr_node(state="OPEN", isDraft=True, mergedAt=None)
+        open_ = pr_node(state="OPEN", mergedAt=None, timelineItems={"nodes": [requested("2026-10-05T10:00:00Z", "team", "core")]})
+        closed = pr_node(state="CLOSED", mergedAt=None, closedAt="2026-10-06T09:00:00Z")
+        recs = [history.build_queue_record(n, self.cfg, self.cc) for n in (draft, open_, closed)]
+        self.assertEqual([r["ready_at"] for r in recs], [None, "2026-10-05T09:00:00+00:00", "2026-10-05T09:00:00+00:00"])
+        self.assertEqual([(r["state"], r["closed_at"]) for r in recs],
+                         [("OPEN", None), ("OPEN", None), ("CLOSED", "2026-10-06T09:00:00Z")])
+        self.assertEqual(recs[1]["reviewers"][0]["who"], "team:acme/core")
+        self.assertNotIn("alice", json.dumps(recs))
+
+    def test_a_bot_opened_pr_is_in_the_queue_file_flagged_with_its_requests(self):
+        bot = pr_node(author={"__typename": "Bot", "login": "dep[bot]"}, state="OPEN", mergedAt=None,
+                      timelineItems={"nodes": [requested("2026-10-05T09:00:01Z", "team", "core")]})
+        rec = history.build_queue_record(bot, self.cfg, self.cc)
+        human = history.build_queue_record(pr_node(), self.cfg, self.cc)
+        self.assertEqual((rec["bot_author"], human["bot_author"]), (True, False))
+        self.assertEqual(rec["reviewers"][0]["who"], "team:acme/core")
+        self.assertNotIn("dep", json.dumps(rec))
+
+    def test_a_removed_request_ends_the_entry(self):
+        removed = dict(requested("2026-10-05T11:00:00Z", "user", "bob"), __typename="ReviewRequestRemovedEvent")
+        node = pr_node(timelineItems={"nodes": [requested("2026-10-05T10:00:00Z", "user", "bob"), removed]})
+        rec = history.build_record(node, self.cfg, self.cc)
+        self.assertEqual([(r["at"], r["done_at"]) for r in rec["reviewers"]],
+                         [("2026-10-05T10:00:00+00:00", "2026-10-05T11:00:00+00:00")])
+        self.assertIn("REVIEW_REQUEST_REMOVED_EVENT", history.CONN["timelineItems"])
+
+    def test_the_queue_search_is_by_created_date_and_not_only_merged(self):
+        calls = []
+
+        def fake(query, variables, name, ttl_s=None):
+            calls.append(variables["q"])
+            if name == "count":
+                return {"data": {"search": {"issueCount": 1}}}
+            return {"data": {"search": {"nodes": [pr_node(number=7)], "pageInfo": {"hasNextPage": False}}}}
+        with mock.patch.object(history, "gh_graphql", fake), contextlib.redirect_stderr(io.StringIO()):
+            nodes, _ = history.search_window("o/r", datetime(2026, 10, 1).date(), datetime(2026, 10, 9).date(), 20, 3600, queue=True)
+        self.assertEqual(set(nodes), {7})
+        self.assertTrue(all("created:2026-10-01..2026-10-09" in q and "is:merged" not in q for q in calls))
+
+    def test_tasks_carry_the_earliest_ready_instant_and_every_reviewer_once(self):
+        prs = [dict(number=n, title="feat: a", author="alice", labels=[], base="main", created_at="2026-10-05T09:00:00Z",
+                    merged_at="2026-10-08T12:00:00Z", first_commit_at=None, size={"lines": {"code": 1, "tests": 0, "docs": 0}},
+                    review={"rounds": 0}, ready_at=ready, first_review_at=first,
+                    reviewers=[dict(who="user:bob", at=at), dict(who=f"user:only{n}", at=at)])
+               for n, ready, first, at in [(1, "2026-10-06T10:00:00+00:00", "2026-10-07T10:00:00+00:00", "2026-10-06T11:00:00+00:00"),
+                                           (2, "2026-10-05T14:00:00Z", "2026-10-06T10:00:00+00:00", "2026-10-05T15:00:00Z")]]
+        lks = [dict(number=n, base="main", closing=[{"number": 50, "excluded": {}}], excluded={}) for n in (1, 2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            row = json.loads((write(tmp, prs, lks, {}) / "tasks.jsonl").read_text())
+        self.assertEqual((row["ready_at"], row["first_review_at"]), ("2026-10-05T14:00:00Z", "2026-10-06T10:00:00+00:00"))
+        self.assertEqual({(r["who"], r["at"]) for r in row["reviewers"]},
+                         {("user:bob", "2026-10-05T15:00:00Z"), ("user:only1", "2026-10-06T11:00:00+00:00"),
+                          ("user:only2", "2026-10-05T15:00:00Z")})
+
+    def test_records_from_before_review_timing_still_make_tasks_and_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prs, lks = synthetic(30)
+            for p in prs:
+                for k in ("ready_at", "first_review_at", "reviewers"):
+                    p.pop(k)
+            d = write(tmp, prs, lks, {})
+            row = json.loads((d / "tasks.jsonl").read_text().splitlines()[0])
+            loaded = bt.load(str(d / "tasks.jsonl"), UTC, {})
+        self.assertEqual((row["ready_at"], row["reviewers"]), (None, []))
+        self.assertTrue(all(r["coding_y"] is None and r["wait_y"] is None and r["queue"] is None for r in loaded))
+
+
+def at(hhmm, day="2026-10-05"):
+    return f"{day}T{hhmm if hhmm.count(':') == 2 else hhmm + ':00'}+00:00"
+
+
+def req(who, hhmm):
+    return dict(who=who, at=at(hhmm))
+
+
+def queue_pr(number, ready, closed=None, reviewers=(), state=None):
+    return dict(number=number, state=state or ("OPEN" if closed is None else "MERGED"),
+                ready_at=at(ready) if ready else None, closed_at=at(closed) if closed else None,
+                first_review_at=None, reviewers=list(reviewers))
+
+
+class SplitTimes(unittest.TestCase):
+    def load_one(self, **kw):
+        row = dict(id=1, title="feat: a", author="alice", labels=[], start=at("09:00"), end=at("12:00", "2026-10-06"),
+                   lines=10, code_lines=10, test_lines=0, doc_lines=0, excluded={}, ready_at=at("15:00"))
+        row.update(kw)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", [row])
+            return bt.load(str(Path(tmp) / "t.jsonl"), UTC, {})[0]
+
+    def test_working_hours_split_at_ready(self):
+        r = self.load_one()
+        self.assertAlmostEqual(r["coding_y"], 6)       # Monday 09:00-15:00
+        self.assertAlmostEqual(r["wait_y"], 6)         # Monday 15:00-18:00, Tuesday 09:00-12:00
+        self.assertAlmostEqual(r["coding_y"] + r["wait_y"], r["y"])
+
+    def test_a_blocked_span_comes_off_coding_only(self):
+        r = self.load_one(excluded={"blocked": [[at("14:00"), at("16:00")]]})
+        self.assertAlmostEqual(r["coding_y"], 5)       # 14:00-15:00 is blocked
+        self.assertAlmostEqual(r["wait_y"], 6)         # 15:00-16:00 blocked, but waiting ignores blocked spans
+        self.assertAlmostEqual(r["y"], 10)
+
+    def test_the_authors_absence_over_the_wait_leaves_wait_unchanged_and_shortens_coding(self):
+        cfg = {"absence": {"alice": ["2026-10-06", "2026-10-05"]}}
+        plain = self.load_one()
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", [dict(id=1, title="feat: a", author="alice", labels=[], start=at("09:00"),
+                        end=at("12:00", "2026-10-06"), lines=1, code_lines=1, test_lines=0, doc_lines=0, excluded={},
+                        ready_at=at("15:00"))])
+            r = bt.load(str(Path(tmp) / "t.jsonl"), UTC, cfg)[0]
+        self.assertAlmostEqual(r["wait_y"], plain["wait_y"])   # Tuesday is alice's day off, not the reviewers'
+        self.assertEqual(r["coding_y"], 0)                      # Monday was too
+        self.assertEqual(r["y"], 0)
+
+    def test_a_public_holiday_comes_off_the_wait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", [dict(id=1, title="feat: a", author="alice", labels=[], start=at("09:00"),
+                        end=at("12:00", "2026-10-06"), lines=1, code_lines=1, test_lines=0, doc_lines=0, excluded={},
+                        ready_at=at("15:00"))])
+            r = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {"absence": {"*": ["2026-10-06"]}})[0]
+        self.assertAlmostEqual(r["wait_y"], 3)
+
+    def test_a_ready_instant_outside_the_task_is_pulled_inside(self):
+        late = self.load_one(ready_at=at("09:00", "2026-10-09"))
+        self.assertEqual((late["wait_y"], round(late["coding_y"], 6)), (0, round(late["y"], 6)))
+        early = self.load_one(ready_at=at("08:00", "2026-10-02"))
+        self.assertEqual((early["coding_y"], round(early["wait_y"], 6)), (0, round(early["y"], 6)))
+
+    def test_a_task_without_ready_at_has_no_split(self):
+        r = self.load_one(ready_at=None)
+        self.assertEqual((r["coding_y"], r["wait_y"]), (None, None))
+
+
+class ReviewerQueue(unittest.TestCase):
+    """The queue a task faced when it became ready, using only what was known at that instant.
+    Ready at 12:00 on Monday; the task asks team X and user u1 (and, at 15:00, user u9)."""
+
+    def task(self):
+        return dict(id=1, title="feat: a", author="alice", labels=[], start=at("09:00"), end=at("12:00", "2026-10-06"),
+                    lines=10, code_lines=10, test_lines=0, doc_lines=0, excluded={}, prs=[100], ready_at=at("12:00"),
+                    first_review_at=at("16:00"),
+                    reviewers=[req("team:x", "11:00"), req("user:u1", "11:00"), req("user:u9", "15:00")])
+
+    def pool(self):
+        return [
+            queue_pr(100, "12:00", reviewers=[req("team:x", "11:00")]),             # the task's own PR
+            queue_pr(1, "10:00", reviewers=[req("team:x", "10:30")]),               # waits on X: counts
+            queue_pr(2, "10:00", closed="11:59", reviewers=[req("team:x", "10:00")]),  # merged before: no
+            queue_pr(3, "10:00", closed="13:00", reviewers=[req("user:u1", "10:00")]),  # still waiting at 12:00: counts
+            queue_pr(4, "10:00", reviewers=[req("team:y", "10:00")]),               # other team: repo only
+            queue_pr(5, "12:30", reviewers=[req("team:x", "12:00")]),               # not ready yet: no
+            queue_pr(6, "09:00", reviewers=[req("team:x", "12:30")]),               # asked X only after 12:00: repo only
+            queue_pr(7, None, reviewers=[req("team:x", "10:00")]),                  # draft: no
+            queue_pr(8, "12:00", reviewers=[req("team:x", "11:59")]),               # ready exactly now: counts
+            queue_pr(9, "08:00", closed="12:00", reviewers=[req("team:x", "08:00")]),  # closed exactly now: no
+            queue_pr(10, "10:00", reviewers=[req("user:u9", "10:00")]),             # u9 was asked on the task later: repo only
+        ]
+
+    def row(self, task, pool):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "t.jsonl", [task])
+            simulate.write_rows(pool, Path(tmp) / "q.jsonl")
+            return bt.load(str(Path(tmp) / "t.jsonl"), UTC, {}, None, bt.load_queue(str(Path(tmp) / "q.jsonl")))[0]
+
+    def queue(self, task, pool):
+        """The queue when the PR goes ready (what the tests below are about)."""
+        r = self.row(task, pool)
+        return r["queue_ready"], r["queue_repo_ready"]
+
+    def test_the_queue_at_the_start_is_counted_at_the_start_for_the_reviewers_the_task_goes_on_to_ask(self):
+        pool = [queue_pr(1, "10:00", reviewers=[req("team:x", "10:00")]), queue_pr(2, "11:00", reviewers=[req("team:x", "11:00")]),
+                queue_pr(3, "08:00", reviewers=[req("team:x", "08:00")]), queue_pr(4, "08:00", reviewers=[req("team:y", "08:00")])]
+        r = self.row(self.task(), pool)     # starts 09:00, ready 12:00, asks team X
+        self.assertEqual((r["queue"], r["queue_repo"]), (1, 2))              # at 09:00 only PRs 3 and 4 are ready; 3 asks X
+        self.assertEqual((r["queue_ready"], r["queue_repo_ready"]), (3, 4))  # at 12:00 PRs 1, 2, 3 ask X
+
+    def test_bot_authored_prs_count_in_the_queue_but_not_in_the_waiting_curve(self):
+        bot = dict(queue_pr(1, "10:00", reviewers=[req("team:x", "10:00")]), bot_author=True)
+        human = queue_pr(2, "10:00", closed="14:00", reviewers=[req("team:x", "10:00")])
+        pool = [bot, human]
+        self.assertEqual(self.queue(self.task(), pool), (2, 2))
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(pool, Path(tmp) / "q.jsonl")
+            loaded = bt.load_queue(str(Path(tmp) / "q.jsonl"))
+        pop = bt.wait_population(loaded, UTC, frozenset(), datetime(2026, 1, 1, tzinfo=UTC))
+        self.assertEqual(len(pop), 1)
+
+    def test_counts_match_a_hand_count(self):
+        self.assertEqual(self.queue(self.task(), self.pool()), (3, 6))  # {1, 3, 8} on X or u1; {1, 3, 4, 6, 8, 10} anywhere
+
+    def test_with_no_reviewer_known_by_ready_the_repo_wide_count_stands_in(self):
+        t = self.task()
+        t["reviewers"] = [req("user:u9", "15:00")]
+        self.assertEqual(self.queue(t, self.pool()), (6, 6))
+
+    def test_nothing_after_ready_moves_the_queue(self):
+        before = self.queue(self.task(), self.pool())
+        t, pool = self.task(), self.pool()
+        t["first_review_at"] = at("23:00")
+        t["end"] = at("12:00", "2026-10-09")
+        t["reviewers"] += [req("user:u10", "16:00"), req("team:z", "13:00")]  # asked after ready
+        by_number = {p["number"]: p for p in pool}
+        by_number[4]["reviewers"].append(req("team:x", "14:00"))              # a request made after ready
+        by_number[4]["reviewers"].append(req("user:u1", "12:03"))             # shortly after ready, on a PR ready long before
+        by_number[10]["reviewers"].append(req("user:u1", "16:00"))
+        by_number[6]["reviewers"] = [req("team:x", "23:00")]                  # a later request moves later still
+        by_number[3]["closed_at"] = at("20:00")                               # merges after ready, at another time
+        by_number[1]["closed_at"] = at("12:01")
+        by_number[1]["state"] = "MERGED"
+        by_number[8]["first_review_at"] = at("12:30")                         # reviews after ready
+        by_number[1]["reviewers"][0]["done_at"] = at("13:00")                 # X answers after ready: still waiting at ready
+        pool += [queue_pr(20, "12:01", reviewers=[req("team:x", "11:00")]),   # opened and readied after ready
+                 queue_pr(21, "13:00", closed="14:00", reviewers=[req("user:u1", "12:00")])]
+        self.assertEqual(self.queue(t, pool), before)
+
+    def test_the_test_would_notice_a_change_made_before_ready(self):
+        pool = self.pool()
+        pool[4]["reviewers"].append(req("team:x", "11:59"))
+        self.assertEqual(self.queue(self.task(), pool), (4, 6))
+
+    def test_requests_a_second_after_ready_count_as_made_at_ready_on_both_sides(self):
+        t = self.task()
+        t["reviewers"] = [req("team:x", "12:00:01")]       # CODEOWNERS asks about a second after the PR opens
+        pool = [queue_pr(1, "12:00", reviewers=[req("team:x", "12:00:01")]), queue_pr(2, "10:00", reviewers=[req("team:y", "10:00")])]
+        self.assertEqual(self.queue(t, pool), (1, 2))      # known reviewer, and PR 1 (ready just now, asked a second later) is on it
+        t["reviewers"] = [req("team:x", "12:06")]          # more than five minutes later is not "at ready"
+        self.assertEqual(self.queue(t, pool), (2, 2))
+        pool[0]["reviewers"] = [req("team:x", "12:06")]
+        t["reviewers"] = [req("team:x", "11:00")]
+        self.assertEqual(self.queue(t, pool), (0, 2))
+        pool[1] = queue_pr(2, "10:00", reviewers=[req("team:x", "12:03")])  # asked 3 minutes after it was ready, hours before it
+        self.assertEqual(self.queue(t, pool), (0, 2))                       # is not "at ready" for a PR ready earlier
+
+    def test_the_queue_is_githubs_review_requested_and_matches_the_skills_search(self):
+        def entry(who, a, done=None):
+            return dict(who=who, at=at(a), done_at=at(done) if done else None)
+        pool = [
+            queue_pr(1, "10:00", reviewers=[entry("user:x", "10:00", "11:00")]),                    # X already reviewed
+            queue_pr(2, "10:00", reviewers=[entry("user:x", "10:00")]),                              # waiting on X
+            queue_pr(3, "10:00", closed="11:30", reviewers=[entry("user:x", "10:00")]),             # merged
+            queue_pr(4, None, reviewers=[entry("user:x", "10:00")]),                                # draft
+            queue_pr(5, "10:00", reviewers=[entry("team:t", "10:00")]),                              # waiting on the team
+            queue_pr(6, "10:00", reviewers=[entry("team:t", "09:00", "11:00")]),                    # a member answered
+            queue_pr(7, "10:00", reviewers=[entry("user:x", "10:00", "11:00"), entry("user:x", "11:30")]),  # asked again
+            queue_pr(8, "10:00", reviewers=[entry("user:x", "10:00"), entry("team:t", "10:00")]),   # both
+        ]
+
+        def gh_search(reviewer, now):
+            """`gh search prs --state open --draft=false --review-requested <reviewer>` at `now`, from the raw rows."""
+            t = lambda x: datetime.fromisoformat(x)
+            return {p["number"] for p in pool if p["ready_at"] and t(p["ready_at"]) <= now
+                    and not (p["closed_at"] and t(p["closed_at"]) <= now)
+                    and any(e["who"] == reviewer and t(e["at"]) <= now and not (e["done_at"] and t(e["done_at"]) <= now)
+                            for e in p["reviewers"])}
+        now = datetime.fromisoformat(at("12:00"))
+        self.assertEqual(gh_search("user:x", now), {2, 7, 8})
+        self.assertEqual(gh_search("team:t", now), {5, 8})
+        for asked, expect in ((["user:x"], {2, 7, 8}), (["team:t"], {5, 8}), (["user:x", "team:t"], {2, 5, 7, 8})):
+            t = self.task()
+            t["reviewers"] = [req(w, "11:00") for w in asked]
+            union = set().union(*(gh_search(w, now) for w in asked))
+            self.assertEqual(union, expect)
+            self.assertEqual(self.queue(t, pool)[0], len(expect))
+
+    def test_a_task_does_not_count_its_own_pr(self):
+        pool = [queue_pr(100, "12:00", reviewers=[req("team:x", "11:00")])]
+        self.assertEqual(self.queue(self.task(), pool), (0, 0))
+
+    def test_terciles_come_from_the_population_queues_before_the_cut_only(self):
+        pop = [dict(ready=datetime(2026, 1, d, tzinfo=UTC), queue=v) for d, v in enumerate((1, 2, 3, 4, 5, 6, 100, 100, 100), 1)]
+        cuts = bt.fit_cuts(pop, datetime(2026, 1, 7, tzinfo=UTC))   # the last three are after the cut
+        rows = [dict(queue=v, queue_ready=None) for v in (1, 3, 6, None)]
+        bt.bucket_queue(rows, cuts)
+        self.assertEqual([r["queue_b"] for r in rows], ["low", "mid", "high", None])
+        self.assertEqual(bt.fit_cuts(pop), bt.tercile_cuts([1, 2, 3, 4, 5, 6, 100, 100, 100]))
+
+
+class KaplanMeier(unittest.TestCase):
+    # Waits 1, 2, 3, 4 h finished; one PR still open after 2.5 h.
+    OBS = [(1, True), (2, True), (2.5, False), (3, True), (4, True)]
+
+    def test_quantiles_match_a_hand_calculation(self):
+        # Survival: 5 at risk, one ends at 1 -> 4/5 = 0.8; 4 at risk, one ends at 2 -> 0.8 * 3/4 = 0.6;
+        # the open PR leaves at 2.5, leaving 2 at risk; one ends at 3 -> 0.6 * 1/2 = 0.3; the last ends at 4 -> 0.
+        self.assertEqual(bt.km_quantile(self.OBS, 0.1), (1, True))   # first time survival <= 0.9
+        self.assertEqual(bt.km_quantile(self.OBS, 0.5), (3, True))   # first time survival <= 0.5
+        self.assertEqual(bt.km_quantile(self.OBS, 0.9), (4, True))   # first time survival <= 0.1
+
+    def test_dropping_the_open_pr_gives_a_shorter_wait(self):
+        finished = [o for o in self.OBS if o[1]]
+        self.assertEqual(bt.km_quantile(finished, 0.5), (2, True))   # 0.75, then 0.5 at 2
+
+    def test_a_curve_that_never_falls_far_enough_reports_a_floor(self):
+        self.assertEqual(bt.km_quantile([(1, True), (5, False)], 0.9), (5, False))
+
+    def test_a_finish_and_an_open_pr_at_the_same_time_count_the_finish_first(self):
+        # 3 at risk at t=2, one finishes: 0.667, so the median is 3. Counting the open PR out first would give 2 at risk and 0.5.
+        self.assertEqual(bt.km_quantile([(2, False), (2, True), (3, True)], 0.5), (3, True))
+
+
+class WaitingRanges(unittest.TestCase):
+    """`estimate` splits the range into coding and waiting once the history carries ready_at."""
+
+    def weekdays(self, n):
+        d, out = datetime(2026, 3, 2, tzinfo=UTC), []
+        while len(out) < n:
+            if d.weekday() < 5:
+                out.append(d)
+            d += timedelta(days=1)
+        return out
+
+    def history(self, tmp, waits, open_ready=(), abandoned=0, old_open=0):
+        """One task per weekday, coding 1 h then waiting `waits[i]` h, each on its own day; `open_ready`
+        are PRs still open that became ready on those weekday indexes."""
+        days = self.weekdays(len(waits) + 40)
+        rows, pool = [], []
+        for i, w in enumerate(waits):
+            s = days[i].replace(hour=9)
+            ready, end = s + timedelta(hours=1), s + timedelta(hours=1 + w)
+            rows.append(dict(id=i + 1, title="feat: x", author=LOGINS[i % 3], labels=[], start=s.isoformat(),
+                             end=end.isoformat(), lines=100, code_lines=100, test_lines=0, doc_lines=0, excluded={},
+                             prs=[i + 1], ready_at=ready.isoformat(), reviewers=[]))
+            pool.append(dict(number=i + 1, state="MERGED", ready_at=ready.isoformat(), closed_at=end.isoformat(),
+                             first_review_at=None, reviewers=[]))
+        for k, d in enumerate(open_ready):
+            pool.append(dict(number=1000 + k, state="OPEN", ready_at=days[d].replace(hour=10).isoformat(),
+                             closed_at=None, first_review_at=None, reviewers=[]))
+        for k in range(abandoned):  # closed unmerged after weeks: the slow ones
+            pool.append(dict(number=2000 + k, state="CLOSED", ready_at=days[3].replace(hour=10).isoformat(),
+                             closed_at=days[30].replace(hour=10).isoformat(), first_review_at=None, reviewers=[]))
+        for k in range(old_open):  # still open, but ready before the tasks file begins
+            pool.append(dict(number=3000 + k, state="OPEN", ready_at="2026-02-16T10:00:00+00:00", closed_at=None,
+                             first_review_at=None, reviewers=[]))
+        write_tasks(Path(tmp) / "r.tasks.jsonl", rows)
+        simulate.write_rows(pool, Path(tmp) / "r.queue.jsonl")
+        return str(Path(tmp) / "r.tasks.jsonl")
+
+    def lines(self, tasks, **kw):
+        return estimate.split_lines(tasks, UTC, "S", {}, **kw)
+
+    def test_prs_still_open_stretch_the_wait_range(self):
+        waits = [1 + i % 4 for i in range(40)]  # 1, 2, 3, 4 hours, ten of each
+        with tempfile.TemporaryDirectory() as tmp:
+            closed_only = self.lines(self.history(tmp, waits))[-2]
+            with_open = self.lines(self.history(tmp, waits, open_ready=range(5, 15)))[-2]
+        # 40 finished: survival is 0.75, 0.5, 0.25, 0 at 1-4 h, so the median is 2 h and the top is 4 h.
+        self.assertIn("median 2.0 h", closed_only)
+        self.assertNotIn("+", closed_only)
+        # ten PRs open far longer than 4 h stay in the count: 0.8, 0.6, 0.4, 0.2 at 1-4 h, then it never reaches 0.1.
+        self.assertIn("median 3.0 h", with_open)
+        self.assertIn("+ work hours", with_open)
+
+    def test_prs_closed_unmerged_stay_in_the_curve_censored_at_their_close(self):
+        waits = [1 + i % 4 for i in range(40)]
+        with tempfile.TemporaryDirectory() as tmp:
+            line = self.lines(self.history(tmp, waits, abandoned=10))[-2]
+        # ten PRs that waited weeks and were then closed unmerged keep the survival at 0.2 after the four
+        # hours, so the median is 3 h and the top is only a floor; dropped, it would read 2 h and 4 h.
+        self.assertIn("median 3.0 h", line)
+        self.assertIn("+ work hours", line)
+        self.assertIn("50 waits, 10 not merged yet or closed unmerged", line)
+
+    def test_a_prs_part_in_the_curve_does_not_change_when_it_closes_unmerged(self):
+        d = lambda h, day=5: datetime(2026, 10, day, h, tzinfo=UTC)
+        pop = [dict(ready=d(10), closed=d(12, 6), merged=False, queue=0, wait=bt.biz_hours(d(10), d(12, 6), UTC), )]
+        still_open = [dict(pop[0], closed=None, wait=None)]
+        at_close = bt.wait_obs(pop, d(12, 6), UTC, frozenset())
+        later = bt.wait_obs(pop, d(12, 9), UTC, frozenset())
+        self.assertEqual(at_close, later)                      # fixed from the close on
+        self.assertEqual(bt.wait_obs(still_open, d(12, 6), UTC, frozenset()), at_close)  # and equal to its censoring at close
+
+    def test_prs_open_since_before_the_tasks_file_begins_do_not_stretch_the_wait(self):
+        waits = [1 + i % 4 for i in range(40)]
+        with tempfile.TemporaryDirectory() as tmp:
+            line = self.lines(self.history(tmp, waits, old_open=10))[-2]
+        self.assertIn("40 waits, 0 not merged yet", line)
+        self.assertIn("median 2.0 h", line)
+
+    def test_a_wait_range_whose_top_is_a_floor_is_logged_as_null_and_left_out_of_the_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks_path = self.history(tmp, [1 + i % 4 for i in range(40)], open_ready=range(5, 15))
+            (Path(tmp) / "cfg.json").write_text(json.dumps({"repo": "acme/r", "data_dir": "."}))
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["estimate", "--config", f"{tmp}/cfg.json", "--tasks", tasks_path, "--size", "S",
+                               "--text", "x", "--log"])
+            [rec] = [json.loads(l) for l in (Path(tmp) / "estimates.jsonl").read_text().splitlines()]
+            self.assertIsNone(rec["wait_h"][2])
+            self.assertIsNotNone(rec["wait_h"][0])
+            rec.update(actual={"hours": 3.0, "coding_hours": rec["coding_h"][1], "wait_hours": 500.0},
+                       author="alice", range_h=[1, 2, 9], baseline_h=[1, 2, 9], issue=7)
+            (Path(tmp) / "estimates.jsonl").write_text(json.dumps(rec) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["score", "--config", f"{tmp}/cfg.json"])
+        self.assertIn("Coding inside its range: 1/1", buf.getvalue())
+        self.assertIn("Waiting inside its range: none judged. 1 skipped", buf.getvalue())
+
+    def test_a_busy_prs_ready_events_are_read_past_the_first_page(self):
+        pr = {"id": "PR_1", "number": 5, "mergedAt": "2026-10-06T12:00:00Z", "createdAt": "2026-10-05T09:00:00Z",
+              "isDraft": True, "baseRefName": "main", "commits": {"nodes": []}, "labelEvents": {"nodes": []},
+              "timelineItems": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}}
+        page2 = {"data": {"node": {"timelineItems": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [
+            {"__typename": "ReadyForReviewEvent", "createdAt": "2026-10-05T15:00:00Z"}]}}}}
+        with mock.patch.object(estimate, "gql", return_value={"pullRequest": pr}), \
+                mock.patch.object(history, "gh_graphql", return_value=page2):
+            got = estimate.actual_for({"repo": "a/b", "pr": 5, "author": "alice"}, UTC, {})
+        self.assertEqual((got["coding_hours"], got["wait_hours"]), (6.0, 6.0))
+
+    def test_a_logged_estimate_carries_the_coding_and_wait_ranges_and_score_reports_their_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks_path = self.history(tmp, [1 + i % 4 for i in range(40)])
+            (Path(tmp) / "cfg.json").write_text(json.dumps({"repo": "acme/r", "data_dir": "."}))
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["estimate", "--config", f"{tmp}/cfg.json", "--tasks", tasks_path, "--size", "S",
+                               "--queue", "2", "--text", "x", "--log"])
+            [rec] = [json.loads(l) for l in (Path(tmp) / "estimates.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rec["coding_h"]), 3)
+            self.assertEqual(len(rec["wait_h"]), 3)
+            self.assertEqual(rec["queue"], 2)
+            rec.update(actual={"hours": 3.0, "coding_hours": rec["coding_h"][1], "wait_hours": rec["wait_h"][2] + 50},
+                       author="alice", range_h=[1, 2, 9], baseline_h=[1, 2, 9], issue=7)
+            (Path(tmp) / "estimates.jsonl").write_text(json.dumps(rec) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), mock.patch.object(estimate, "me", return_value="alice"):
+                estimate.main(["score", "--config", f"{tmp}/cfg.json"])
+        self.assertIn("Coding inside its range: 1/1", buf.getvalue())
+        self.assertIn("Waiting inside its range: 0/1", buf.getvalue())
+
+    def test_the_actual_coding_and_wait_come_from_the_ready_instant(self):
+        pr = {"number": 5, "mergedAt": "2026-10-06T12:00:00Z", "createdAt": "2026-10-05T09:00:00Z", "isDraft": False,
+              "baseRefName": "main", "commits": {"nodes": []}, "labelEvents": {"nodes": []},
+              "timelineItems": {"nodes": [{"__typename": "ConvertToDraftEvent", "createdAt": "2026-10-05T11:00:00Z"},
+                                          {"__typename": "ReadyForReviewEvent", "createdAt": "2026-10-05T15:00:00Z"}]}}
+        # opened ready, turned into a draft, readied again: ready from the start, so no coding time
+        with mock.patch.object(estimate, "gql", return_value={"pullRequest": pr}):
+            got = estimate.actual_for({"repo": "a/b", "pr": 5, "author": "alice"}, UTC, {})
+        self.assertEqual((got["coding_hours"], got["wait_hours"], got["hours"]), (0.0, 12.0, 12.0))
+
+    def test_no_queue_flag_prints_the_unconditioned_range_and_a_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.lines(self.history(tmp, [2] * 40))
+        self.assertTrue(out[0].startswith("Coding, size S:") or out[0].startswith("Coding, any size:"))
+        self.assertTrue(out[1].startswith("Waiting for review, any queue:"))
+        self.assertIn("--queue N", out[2])
+
+    def test_a_history_without_ready_at_prints_no_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tasks(Path(tmp) / "x.tasks.jsonl", task_rows(80))
+            self.assertEqual(self.lines(str(Path(tmp) / "x.tasks.jsonl")), [])
+
+    def test_queue_flag_without_a_queue_file_says_so_and_still_gives_a_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks_path = self.history(tmp, [2] * 40)
+            (Path(tmp) / "r.queue.jsonl").unlink()
+            out = self.lines(tasks_path, queue_n=5)
+        self.assertIn("No queue file", out[1])
+        self.assertTrue(out[2].startswith("Waiting for review, any queue:"))
+
+
+class SimulatedWait(unittest.TestCase):
+    """The wait-dominates world: coding follows size, waiting follows the reviewer queue, and the total
+    is mostly waiting. Scored on the locked slice with the real loader and queue code."""
+    SEEDS = range(7, 12)
+
+    cache = {}
+
+    def tables(self, seed):
+        if seed not in self.cache:
+            self.cache[seed] = self.score_tables(seed)
+        return self.cache[seed]
+
+    def score_tables(self, seed):
+        rows, _, queue = simulate.generate_all("wait-dominates", seed)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(rows, Path(tmp) / "t.jsonl")
+            simulate.write_rows(queue, Path(tmp) / "q.jsonl")
+            pool = bt.load_queue(str(Path(tmp) / "q.jsonl"))
+            rows = bt.load(str(Path(tmp) / "t.jsonl"), UTC, {}, None, pool)
+        since = min(r["start"] for r in rows)
+        cut = max(r["end"] for r in rows) - timedelta(days=21)
+        rows = [r for r in rows if r["start"] <= cut]
+        _, lock = bt.split(len(rows), 200)
+        pop = bt.wait_population(pool, UTC, frozenset(), since)
+        ctx = dict(tz=UTC, holidays=frozenset(), pop=pop, cuts=bt.fit_cuts(pop, rows[lock]["start"]))
+        bt.bucket_queue(rows, ctx["cuts"])
+        idx = list(range(lock, len(rows)))
+        out = {}
+        for title, key, names in (("TOTAL", "y", ("size", "baseline: repo")), ("CODING", "coding_y", ("size", "baseline: repo")),
+                                  ("WAIT", "wait_y", ("size", "queue", "queue at ready", "size+queue", "km wait",
+                                                      "km wait+queue", "km wait+queue at ready", "baseline: repo"))):
+            view = [dict(r, y=r[key]) for r in rows]
+            out[title] = {n: bt.score(bt.run(view, idx, n, 10, 0.1, 0.9, ctx)) for n in names}
+        return out
+
+    def ratios(self, title, method, against="baseline: repo"):
+        return [self.tables(seed)[title][method]["winkler"] / self.tables(seed)[title][against]["winkler"]
+                for seed in self.SEEDS]
+
+    def test_coding_follows_size(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self.assertTrue(0.70 <= self.tables(seed)["CODING"]["size"]["coverage"] <= 0.90)
+        r = self.ratios("CODING", "size")
+        self.assertLess(sum(r) / len(r), 0.85)
+        self.assertLess(max(r), 0.95)
+
+    def test_waiting_follows_the_queue_counted_at_the_start_and_not_size(self):
+        r = self.ratios("WAIT", "queue")
+        self.assertLess(sum(r) / len(r), 0.85)
+        self.assertLess(max(r), 0.95)
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                w = self.tables(seed)["WAIT"]
+                self.assertGreater(w["size"]["winkler"], 0.95 * w["baseline: repo"]["winkler"])
+
+    def test_total_cycle_time_is_mostly_waiting_so_size_barely_helps(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                t = self.tables(seed)["TOTAL"]
+                self.assertGreater(t["size"]["winkler"], 0.85 * t["baseline: repo"]["winkler"])
+
+    def test_backtest_prints_the_coding_and_wait_tables(self):
+        rows, _, queue = simulate.generate_all("wait-dominates", 7, 400)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(rows, Path(tmp) / "t.jsonl")
+            simulate.write_rows(queue, Path(tmp) / "q.jsonl")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bt.main(["--in", str(Path(tmp) / "t.jsonl"), "--queue", str(Path(tmp) / "q.jsonl")])
+            no_queue = io.StringIO()
+            with contextlib.redirect_stdout(no_queue):
+                bt.main(["--in", str(Path(tmp) / "t.jsonl")])
+        out = buf.getvalue()
+        coding = out.split("== LOCKED · CODING ==")[1].split("==")[0]
+        wait = out.split("== LOCKED · WAIT ==")[1].split("==")[0]
+        self.assertNotIn("queue", coding)
+        for method in ("baseline: repo", "baseline: same author", "size", "queue", "size+queue"):
+            self.assertIn(method, wait)
+        self.assertIn("== LOCKED · all tasks ==", out)  # the total tables stay
+        self.assertNotIn("size+queue", no_queue.getvalue())
+        self.assertIn("== LOCKED · WAIT ==", no_queue.getvalue())
+
+    def test_the_km_wait_at_a_start_knows_nothing_after_it(self):
+        _, _, queue = simulate.generate_all("wait-dominates", 7, 300)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(queue, Path(tmp) / "q.jsonl")
+            pool = bt.load_queue(str(Path(tmp) / "q.jsonl"))
+        pop = bt.wait_population(pool, UTC, frozenset(), min(p["ready"] for p in pool if p["ready"]))
+        now = sorted(p["ready"] for p in pop)[len(pop) // 2]
+        before = bt.wait_obs(pop, now, UTC, frozenset())
+        later = [dict(p) for p in pop]
+        for p in later:
+            if p["closed"] and p["closed"] > now:
+                p["closed"] += timedelta(days=30)                         # closes later than it did
+                p["merged"], p["wait"] = (not p["merged"]), 99.0          # or ends another way
+        self.assertEqual(sorted(bt.wait_obs(later, now, UTC, frozenset())), sorted(before))
+        self.assertTrue(any(not f for _, f in before) and any(f for _, f in before))
+
+    def test_the_backtest_scores_the_km_wait_that_estimate_prints(self):
+        rows, _, queue = simulate.generate_all("wait-dominates", 7, 400)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(rows, Path(tmp) / "tasks.jsonl")
+            simulate.write_rows(queue, Path(tmp) / "queue.jsonl")      # found beside tasks.jsonl without --queue
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bt.main(["--in", str(Path(tmp) / "tasks.jsonl")])
+        wait = buf.getvalue().split("== LOCKED · WAIT ==")[1]
+        self.assertIn("km wait ", wait)
+        self.assertIn("km wait+queue", wait)
+        self.assertNotIn("km wait", buf.getvalue().split("== LOCKED · CODING ==")[1].split("== LOCKED · WAIT ==")[0])
+
+    def test_km_wait_with_the_queue_improves_on_the_unconditioned_one_most_when_re_estimated_at_ready(self):
+        at_ready = self.ratios("WAIT", "km wait+queue at ready", "km wait")
+        self.assertLess(sum(at_ready) / len(at_ready), 0.85)
+        self.assertLess(max(at_ready), 0.95)
+        at_start = self.ratios("WAIT", "km wait+queue", "km wait")
+        self.assertLess(sum(at_start) / len(at_start), 0.95)
+
+    def test_queue_files_are_found_beside_tasks_files_under_either_naming(self):
+        self.assertEqual(bt.queue_path("d/tasks.jsonl"), Path("d/queue.jsonl"))
+        self.assertEqual(bt.queue_path("d/repo.tasks.jsonl"), Path("d/repo.queue.jsonl"))
+        self.assertIsNone(bt.queue_path("d/other.jsonl"))
+
+    def test_the_estimate_conditions_waiting_on_the_queue(self):
+        rows, _, queue = simulate.generate_all("wait-dominates", 7, 500)
+        with tempfile.TemporaryDirectory() as tmp:
+            simulate.write_rows(rows, Path(tmp) / "r.tasks.jsonl")
+            simulate.write_rows(queue, Path(tmp) / "r.queue.jsonl")
+            medians = {}
+            for depth in (0, 20):
+                [line] = [l for l in estimate.split_lines(str(Path(tmp) / "r.tasks.jsonl"), UTC, "M", {}, queue_n=depth)
+                          if l.startswith("Waiting")]
+                self.assertIn(f"with {depth} PRs already waiting", line)
+                medians[depth] = float(re.search(r"median ([\d.]+)", line).group(1))
+        self.assertLess(medians[0], medians[20])
+
+    def test_same_seed_gives_the_same_queue_file_and_it_knows_nothing_after_the_data_ends(self):
+        a, b = (simulate.generate_all("wait-dominates", 7, 200)[2] for _ in range(2))
+        self.assertEqual(a, b)
+        self.assertEqual({r["state"] for r in a}, {"MERGED", "CLOSED", "OPEN"})
+        opens = [r for r in a if r["state"] == "OPEN"]
+        self.assertTrue(all(r["closed_at"] is None for r in opens))
+        newest = max(t for r in a for t in (r["created_at"], r["ready_at"], r["closed_at"], r["first_review_at"],
+                                            *[x["at"] for x in r["reviewers"]]) if t)
+        self.assertEqual(newest, max(r["created_at"] for r in a))  # the last PR opened ends the data
+
+    def test_reviewers_come_from_two_teams(self):
+        rows, _, queue = simulate.generate_all("wait-dominates", 7, 200)
+        teams = {x["who"] for r in queue for x in r["reviewers"] if x["who"].startswith("team:")}
+        self.assertEqual(teams, {"team:acme/team-a", "team:acme/team-b"})
+        self.assertTrue(all(r["reviewers"] and r["ready_at"] and r["prs"] for r in rows))
