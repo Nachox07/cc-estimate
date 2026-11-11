@@ -338,6 +338,22 @@ class Backtest(unittest.TestCase):
         inside = self.lag_rows(-timedelta(seconds=1))
         self.assertEqual(bt.run(inside, [5], "baseline: repo", 5, 0.1, 0.9, lag=10), [])
 
+    def lag_history(self):
+        """Steady 3-day tasks (16 h) plus 20-day ones (100 h) that only the buggy anchor leaves in the trailing sample."""
+        d0 = datetime(2026, 1, 1, tzinfo=UTC)
+        rows = [scored_row(d0 + timedelta(days=i), d0 + timedelta(days=i + 3), 16.0) for i in range(300)]
+        rows += [scored_row(d0 + timedelta(days=d), d0 + timedelta(days=d + 20), 100.0) for d in range(140, 260, 2)]
+        rows.sort(key=lambda r: r["start"])
+        return rows
+
+    def test_the_trailing_baseline_keeps_its_level_when_history_is_lagged(self):
+        rows = self.lag_history()
+        idx = [i for i, r in enumerate(rows) if r["y"] == 16.0 and r["start"] >= datetime(2026, 9, 1, tzinfo=UTC)]
+        for lag in (0, 40):
+            with self.subTest(lag=lag):
+                out = bt.run(rows, idx, "baseline: trailing 30d", 5, 0.1, 0.9, lag)
+                self.assertGreater(bt.score(out)["coverage"], 0.9)
+
     def test_weighted_quantile_matches_the_plain_one_for_equal_weights(self):
         xs = [3.0, 1.0, 8.0, 2.0, 9.0, 4.0, 7.0]
         for p in (0.1, 0.5, 0.9):

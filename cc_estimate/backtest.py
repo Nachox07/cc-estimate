@@ -249,7 +249,8 @@ def match(keys):
 
 
 def trailing(h, t):
-    cut = t["start"] - timedelta(days=30)
+    """Tasks that ended in the 30 days before the lagged cut (`ref`), which is t's start when there is no lag."""
+    cut = t.get("ref", t["start"]) - timedelta(days=30)
     return [x["y"] for x in h if x["end"] >= cut]
 
 
@@ -327,7 +328,7 @@ def run(rows, idx, name, k_min, lo_p, hi_p, lag=0):
         h = [x for x in rows[:i] if x["end"] <= t["start"]]
         if lag:
             h = [x for x in h if x["start"] <= t["start"] - timedelta(days=lag)]
-        e = estimate(h, t, name, k_min, lo_p, hi_p)
+        e = estimate(h, dict(t, ref=t["start"] - timedelta(days=lag)), name, k_min, lo_p, hi_p)
         if not e:
             continue
         lo, med, hi, fell = e
