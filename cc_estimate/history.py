@@ -192,11 +192,14 @@ CONN = {
     "comments": ("comments(first: 100{after}) { totalCount pageInfo { hasNextPage endCursor } nodes { "
                  "author { __typename login } createdAt } }"),
     "timelineItems": ("timelineItems(first: 100{after}, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, "
-                      "HEAD_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT]) { pageInfo { hasNextPage endCursor } "
+                      "HEAD_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT]) "
+                      "{ pageInfo { hasNextPage endCursor } "
                       "nodes { __typename "
                       "... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } "
                       "... on HeadRefForcePushedEvent { createdAt } "
                       "... on ReviewRequestedEvent { createdAt requestedReviewer { __typename "
+                      "... on User { login } ... on Team { slug organization { login } } } } "
+                      "... on ReviewRequestRemovedEvent { createdAt requestedReviewer { __typename "
                       "... on User { login } ... on Team { slug organization { login } } } } } }"),
 }
 LABELS = "labels(first: 50) { nodes { name } }"
@@ -413,13 +416,16 @@ def ready_instant(n: dict, tl: list) -> datetime | None:
 def reviewer_list(n: dict, author: str | None, cc: dict) -> list[dict]:
     """Who was asked to review, and for how long it stayed on them. Each entry is a request time
     (`at`, users and teams, from review-request events) and `done_at`, when that reviewer next
-    submitted a review (a team: when any human did), or null while it still waits. A later request
+    submitted a review (a team: when any human did, which ends a team's request early) or the request
+    was removed, or null while it still waits. A later request
     made while an earlier one is open adds nothing; one made after a review starts a new entry. Humans
     who reviewed unasked get an entry that starts and ends at their first review."""
     asked: dict[str, list[datetime]] = {}
+    removed: dict[str, list[datetime]] = {}
     for e in n["timelineItems"]["nodes"]:
         r = e.get("requestedReviewer") or {}
-        if e.get("__typename") != "ReviewRequestedEvent":
+        kind = e.get("__typename")
+        if kind not in ("ReviewRequestedEvent", "ReviewRequestRemovedEvent"):
             continue
         if r.get("__typename") == "Team" and r.get("slug"):
             who = f"team:{(r.get('organization') or {}).get('login', '')}/{r['slug']}"
@@ -427,7 +433,7 @@ def reviewer_list(n: dict, author: str | None, cc: dict) -> list[dict]:
             who = f"user:{r['login']}"
         else:
             continue
-        asked.setdefault(who, []).append(ts(e["createdAt"]))
+        (asked if kind == "ReviewRequestedEvent" else removed).setdefault(who, []).append(ts(e["createdAt"]))
     subs: dict[str, list[datetime]] = {}
     for r in n["reviews"]["nodes"]:
         a = r.get("author")
@@ -436,12 +442,12 @@ def reviewer_list(n: dict, author: str | None, cc: dict) -> list[dict]:
     anyone = sorted(t for v in subs.values() for t in v)
     out = []
     for who, times in asked.items():
-        mine = sorted(subs.get(who, [])) if who.startswith("user:") else anyone
+        ends = sorted((subs.get(who, []) if who.startswith("user:") else anyone) + removed.get(who, []))
         open_until = None  # the end of the entry just opened; None = still open
         for t in sorted(times):
             if out and out[-1][0] == who and (open_until is None or t < open_until):
                 continue
-            open_until = next((x for x in mine if x > t), None)
+            open_until = next((x for x in ends if x > t), None)
             out.append((who, t, open_until))
     for who, v in subs.items():
         if who not in asked:
@@ -450,12 +456,11 @@ def reviewer_list(n: dict, author: str | None, cc: dict) -> list[dict]:
     return [{"who": w, "at": t.isoformat(), "done_at": d.isoformat() if d else None} for w, t, d in out]
 
 
-def build_queue_record(n: dict, cfg: dict, cc: dict) -> dict | None:
+def build_queue_record(n: dict, cfg: dict, cc: dict) -> dict:
     """One PR in any state, for measuring how many were waiting on reviewers at a given time.
-    Bot-opened PRs are left out, as they are from tasks. No author or title is kept."""
+    Bot-opened PRs are kept, flagged `bot_author`: they sit in reviewers' real queues (dependabot with
+    CODEOWNERS requests); tasks skip them. No author or title is kept."""
     author = n.get("author") or {}
-    if is_bot(author, cc):
-        return None
     tl = n["timelineItems"]["nodes"]
     ready_at = ready_instant(n, tl)
     human = sorted(ts(r["submittedAt"]) for r in n["reviews"]["nodes"]
@@ -463,7 +468,7 @@ def build_queue_record(n: dict, cfg: dict, cc: dict) -> dict | None:
                    and not is_bot(r.get("author"), cc))
     return {"number": n["number"], "state": n["state"], "created_at": n["createdAt"],
             "ready_at": ready_at.isoformat() if ready_at else None,
-            "first_review_at": human[0].isoformat() if human else None,
+            "first_review_at": human[0].isoformat() if human else None, "bot_author": is_bot(author, cc),
             "closed_at": n.get("mergedAt") or n.get("closedAt"),
             "reviewers": reviewer_list(n, author.get("login"), cc)}
 
@@ -684,7 +689,7 @@ def cmd_fetch_queue(a):
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as ex:
         done = list(ex.map(lambda num: complete_connections(nodes[num], ("reviews", "timelineItems"), 3600),
                            sorted(nodes)))
-    recs = [r for r in (build_queue_record(node, cfg, cc) for node in done) if r]
+    recs = [build_queue_record(node, cfg, cc) for node in done]
     with open_out(a.out) as out:
         for rec in recs:
             out.write(json.dumps(rec) + "\n")
