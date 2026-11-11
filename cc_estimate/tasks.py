@@ -5,11 +5,29 @@ Grouping key: the PR's lowest-numbered closing issue; a PR closing nothing is it
 Body references ("Refs #N") are not used: most cite umbrella issues or rules.
 Release-branch PRs are carries of work already counted on main and are dropped.
 Bot and automation authors are dropped.
+Review timing is carried so cycle time can be split into coding and waiting: the task is ready when
+its first PR is, and its reviewers are everyone asked on any of its PRs, with the earliest time.
 """
 import argparse, json, re
 from pathlib import Path
 from collections import defaultdict
 from .files import open_out
+
+
+def when(s):
+    return s.replace("Z", "+00:00")
+
+
+def earliest(times):
+    return min(times, key=when) if times else None
+
+
+def merge_reviewers(prs):
+    times = defaultdict(list)
+    for p in prs:
+        for r in p.get("reviewers") or []:
+            times[r["who"]].append(r["at"])
+    return [{"who": w, "at": earliest(at)} for w, at in times.items()]
 
 
 def main(argv=None):
@@ -59,6 +77,9 @@ def main(argv=None):
                 lines=code + tests + docs, code_lines=code, test_lines=tests, doc_lines=docs,
                 excluded=excluded,
                 review_rounds=sum(prs[n]["review"]["rounds"] for n in ns),
+                ready_at=earliest([prs[n]["ready_at"] for n in ns if prs[n].get("ready_at")]),
+                first_review_at=earliest([prs[n]["first_review_at"] for n in ns if prs[n].get("first_review_at")]),
+                reviewers=merge_reviewers([prs[n] for n in ns]),
             )) + "\n")
     multi = sum(len(v) > 1 for v in groups.values())
     print(f"{len(keep)} PRs -> {len(groups)} tasks ({multi} with >1 PR)")

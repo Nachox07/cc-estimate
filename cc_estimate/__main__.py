@@ -6,6 +6,7 @@ Start:
 Build the history. Pick one source, then refresh monthly:
   git-tasks  from local git only; any tracker key in commit messages (ABC-123, #123)
   fetch      GitHub: merged PRs                   -> data/<repo>.jsonl
+  fetch-queue GitHub: every PR by created date     -> data/<repo>.queue.jsonl (reviewer queue)
   links      GitHub: issue links, label time spans -> data/<repo>.links.jsonl
   tasks      GitHub: group PRs into tasks         -> data/<repo>.tasks.jsonl
 Then, optionally:
@@ -46,7 +47,7 @@ def main(argv=None):
     cmd, rest = argv[0], argv[1:]
     if cmd == "init":
         return init(rest)
-    if cmd in ("fetch", "summary", "ci"):
+    if cmd in ("fetch", "fetch-queue", "summary", "ci"):
         return history.main([cmd, *rest])
     if cmd in ("estimate", "attach", "score"):
         return estimate.main([cmd, *rest])
