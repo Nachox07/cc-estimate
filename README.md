@@ -83,8 +83,9 @@ where the backtest shows it winning on your repo.
 **Coding and waiting.** When the history knows when each PR was ready for review, `estimate` also
 prints a coding range (by size) and a waiting range, and `backtest` scores both. Waiting follows how
 many PRs are already waiting on your reviewers, not the size: pass that count as `--queue N`
-(fetch the history with `fetch-queue`; "waiting on a reviewer" means what GitHub's `review-requested`
-search means). Pull requests still open count in the waiting range; ones closed unmerged do not.
+(fetch the history with `fetch-queue`; "waiting on a reviewer" means what GitHub's
+`user-review-requested` / `team-review-requested` searches mean). Pull requests still open, and ones
+closed unmerged, count in the waiting range as unfinished waits.
 The waiting clock skips public holidays only, not the author's days off. [How it
 works](docs/how-it-works.md#coding-and-waiting) has the definitions.
 
@@ -164,7 +165,7 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 
 The reviewer queue comes from a second file, `<repo>.queue.jsonl`, one row per PR in any state
 (`number`, `state`, `created_at`, `ready_at`, `first_review_at`, `closed_at`, `reviewers` as `{who, at, done_at}`
-where `done_at` is when that reviewer answered; no authors or titles), written by `cc-estimate fetch-queue`. It is used only to count who was waiting. Files without
+where `done_at` is when that reviewer answered or the request was removed, and `bot_author`; no authors or titles), written by `cc-estimate fetch-queue`. It is used only to count who was waiting. Files without
 the optional fields still load; they just get no coding and waiting split.
 
 A new source is any script that writes those rows: a Jira or Linear API export, Azure DevOps,
@@ -184,7 +185,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small
 hand-made inputs, checks that no estimate can see the future, and runs generated histories where
 size matters and where it does not: size must win clearly in the first and must not win in the
-second, across five seeds. `python3 tests/mutation_probe.py` plants 34 known bugs one at a time and
+second, across five seeds. `python3 tests/mutation_probe.py` plants 37 known bugs one at a time and
 confirms the suite catches every one. Details: [How it
 works](docs/how-it-works.md#how-it-is-tested).
 
