@@ -123,8 +123,9 @@ def wait_dominates(rnd, n):
     the PRs already ready and unmerged on the same team(s), so the queue is built, not assumed.
     A quarter of PRs name their reviewers only after they are ready, and 6% are closed unmerged. Of the
     rest, two in five have their reviewers requested a few seconds after ready, as CODEOWNERS does
-    (picked by index, not drawn, so the other draws do not move). The first reviewer to answer ends
-    their own request and their team's; the other team's request stays until the merge.
+    (picked by index, not drawn, so the other draws do not move). The first review ends that
+    reviewer's request and every team's (any human's review ends a team request, as the loader reads
+    it); a second person's request stays until the merge.
     The data ends when the last PR is opened; PRs not done by then are open.
     Measured over seeds 0-30 with the real loader: 31 of 31 meet the bars; the closest is seed 10, WAIT
     queue at 0.84 of the baseline's Winkler against the 0.85 bar (seed 19: 0.83)."""
@@ -147,8 +148,7 @@ def wait_dominates(rnd, n):
             at = s["ready"] + (1 + s["idx"] % 3) / 3600
         users = [f"user:{rnd.choice(TEAMS[t])}" for t in s["teams"]]
         s["first_review"] = s["ready"] + wait * rnd.uniform(0.85, 0.98)
-        answered = {users[0], f"team:acme/{s['teams'][0]}"}
-        s["reviewers"] = [(x, at, s["first_review"] if x in answered else None)
+        s["reviewers"] = [(x, at, s["first_review"] if x.startswith("team:") or x == users[0] else None)
                           for x in [f"team:acme/{t}" for t in s["teams"]] + users]
         s["state"] = "OPEN" if s["end"] > cutoff else "MERGED" if s["task"] else "CLOSED"
     return specs, dict(
