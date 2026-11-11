@@ -7,10 +7,12 @@
 Verdicts: Split, Merge, Keep, No advice. Each comes with one plain sentence saying why.
 
 Break point. For each size bucket with at least 5 finished tasks (and 3 authors, or it is hidden),
-take the spread of its 80% range relative to scale: log(p90 + 1) - log(p10 + 1) of work hours, so a
+take the spread of its 80% range relative to scale: log(p90) - log(p10) of work hours, each floored at
+FLOOR_H (0.25 h), so a
 spread that is a constant fraction of the duration is the same at every size. The break point is the
 smallest bucket whose spread is wider than the bucket directly below it by more than GROWTH (1.5x),
 with the bootstrap 90% interval of the ratio (each bucket resampled, fixed seed) wholly above GROWTH.
+A bucket whose p10 is under the floor is shown with a note and not compared: its lower end is not measured.
 The same is done by number of areas (1, 2, 3, 4+) when
 `--profiles` (from `classify`) supplies areas; without them the advisor works on size only, and says so.
 
@@ -22,8 +24,8 @@ no advice when:
     (a sub-issue link; no source writes it yet, issue #22). Its total is the SUM of the slices'
     working hours, compared with single tasks (no parent) whose product-code size equals the set's
     summed size. Splitting counts as faster when, over the buckets at or above the break that have
-    at least 3 sets and 3 single tasks, the set medians (weighted by set count) are below the single
-    medians, with at least 5 sets overall. Without parent links, or without enough sets, the advice
+    at least 3 sets and 3 single tasks, the set medians (weighted by set count) are at least 20% below the
+    single medians, with at least 5 sets overall. Without parent links, or without enough sets, the advice
     rests on the break rule alone and the report says past splits could not be checked.
 Tasks below the size L get Keep when the break cannot be judged; L and XL get No advice.
 
@@ -52,8 +54,10 @@ from .history import MIN_AUTHORS, MIN_CELL
 SIZES = [name for _, name in bt.BUCKETS]
 GROWTH = 1.5         # a break: the bootstrap 90% interval of the spread ratio to the bucket below lies wholly above this
 BOOT = 500
+FLOOR_H = 0.25      # work hours; shorter durations count as this long
 MIN_SIDE = 20        # finished tasks needed on each side of the break
 MIN_SETS, MIN_PER_BUCKET = 5, 3
+SPLIT_GAIN = 0.2     # splits must take at least this share less total work than single tasks
 AREA_GROUPS = ("1", "2", "3", "4+")
 DEFAULT_LAYERS = [
     ("shared code", [r"(^|/)(shared|common|core|lib|libs|utils?)/"]),
@@ -93,8 +97,15 @@ def shown(rs):
 
 
 def spread(ys):
-    """Width of the 80% range in log hours, so a spread that is a constant fraction of the duration is the same at every size."""
-    return math.log(bt.q(ys, est.HI_P) + 1) - math.log(bt.q(ys, est.LO_P) + 1)
+    """Width of the 80% range in log hours, so a spread that is a constant fraction of the duration is the same at every size.
+    Durations are floored at FLOOR_H: log is undefined at zero and exaggerates tiny differences near it."""
+    return math.log(max(bt.q(ys, est.HI_P), FLOOR_H)) - math.log(max(bt.q(ys, est.LO_P), FLOOR_H))
+
+
+def floored(ys):
+    """True when the 10th percentile lies under the floor: the lower end of the range is then not measured,
+    so the spread is not comparable with a bucket whose p10 is above it."""
+    return bt.q(ys, est.LO_P) < FLOOR_H
 
 
 def jump(prev, cur):
@@ -106,23 +117,25 @@ def jump(prev, cur):
 
 
 def find_break(groups, members):
-    """The first group whose spread is wider than the one below by more than GROWTH, with the bootstrap
-    interval of the ratio above GROWTH. Groups under 5 tasks or hidden for privacy cannot be compared, nor can the one above.
-    detail: (group, n, spread, shown, ratio, interval)"""
+    """The first group whose bootstrap 90% interval for spread(group) / spread(group below) has its lower bound
+    above GROWTH. Groups under 5 tasks, hidden for privacy, or with p10 under the floor are not compared (nor is
+    the pair they belong to).
+    detail: (group, n, spread, shown, ratio, interval, floored)"""
     prev = None
     detail = []
     for g in groups:
         rs = members[g]
-        ok = len(rs) >= est.MIN_N and shown(rs)
         ys = [r["y"] for r in rs]
+        ok = len(rs) >= est.MIN_N and shown(rs)
+        fl = ok and floored(ys)
         w = spread(ys) if ok else None
         ratio = ci = None
-        if prev is not None and w is not None and prev[1] is not None and prev[1] > 0:
+        if prev is not None and w is not None and prev[1] is not None and not fl and not prev[3]:
             ratio, ci = w / prev[1], jump(prev[2], ys)
-        detail.append((g, len(rs), w, shown(rs), ratio, ci))
+        detail.append((g, len(rs), w, shown(rs), ratio, ci, fl))
         if ci and ci[0] > GROWTH:
             return g, detail
-        prev = (g, w, ys) if w is not None else (g, None, None)
+        prev = (g, w, ys, fl) if w is not None else (g, None, None, False)
     return None, detail
 
 
@@ -143,41 +156,45 @@ def load_history(tasks_path, tz, cfg, profiles_path=None):
                 has_areas=any(r["areas"] for r in rows), tz=tz)
 
 
-def split_evidence(rows, break_size):
-    """Did past splits at or above the break take less work in total than single tasks of the same total size?
+def split_evidence(rows, break_size, tz):
+    """Did past splits at or above the break take at least SPLIT_GAIN less work in total than single tasks of the same total size?
     A split is the tasks sharing a `parent` (sub-issue) link; its total is the SUM of their working hours.
-    Returns (verdict, text) with verdict True, False or None (cannot check)."""
+    The wall-clock span of each split is reported beside it but decides nothing.
+    Returns (state, text): state True (paid off), False (did not), None (cannot check)."""
     if not any(r["parent"] is not None for r in rows):
         return None, "this history has no parent links between tasks, so past splits cannot be found"
     by_parent = {}
     for r in rows:
         if r["parent"] is not None:
             by_parent.setdefault(r["parent"], []).append(r)
-    sets = [(bt.bucket(sum(r["code_lines"] for r in rs)), sum(r["y_raw"] for r in rs)) for rs in by_parent.values() if len(rs) > 1]
-    singles = [r for r in rows if r["parent"] is None]
+    splits = [rs for rs in by_parent.values() if len(rs) > 1]
+    sets = [(bt.bucket(sum(r["code_lines"] for r in rs)), sum(r["y_raw"] for r in rs),
+             bt.biz_hours(min(r["start"] for r in rs), max(r["end"] for r in rs), tz)) for rs in splits]
+    # a parent with a single child is not a split: that task counts as a single
+    in_split = {id(r) for rs in splits for r in rs}
+    singles = [r for r in rows if id(r) not in in_split]
     cmp = []
     for size in SIZES[SIZES.index(break_size):]:
-        s = [t for b, t in sets if b == size]
+        s = [t for t in sets if t[0] == size]
         one = [r["y_raw"] for r in singles if r["size"] == size]
         if len(s) >= MIN_PER_BUCKET and len(one) >= MIN_PER_BUCKET:
-            cmp.append((size, len(s), st.median(s), st.median(one)))
+            cmp.append((size, len(s), st.median(t[1] for t in s), st.median(t[2] for t in s), st.median(one)))
     n_sets = sum(c[1] for c in cmp)
     if n_sets < MIN_SETS:
         return None, f"only {n_sets} past splits at or above {break_size} can be compared (need {MIN_SETS})"
-    split_m = sum(c[1] * c[2] for c in cmp) / n_sets
-    one_m = sum(c[1] * c[3] for c in cmp) / n_sets
-    text = (f"{n_sets} past splits at or above {break_size} took a median of {split_m:.1f} work hours in total, "
-            f"against {one_m:.1f} for single tasks of the same size")
-    return split_m < one_m, text
+    split_m, span_m, one_m = (sum(c[1] * c[k] for c in cmp) / n_sets for k in (2, 3, 4))
+    text = (f"{n_sets} past splits at or above {break_size} took a median of {split_m:.1f} work hours in total "
+            f"(wall-clock span {span_m:.1f}), against {one_m:.1f} for single tasks of the same size")
+    return split_m <= (1 - SPLIT_GAIN) * one_m, text
 
 
-def analyse(h):
+def analyse(h, tz):
     """Everything the verdicts need from the history, as a dict."""
     rows = h["rows"]
     members = {s: [r for r in rows if r["size"] == s] for s in SIZES}
     size_break, size_detail = find_break(SIZES, members)
     out = dict(n=len(rows), newest=h["newest"], size_detail=size_detail, size_break=size_break,
-               area_break=None, area_detail=None, has_areas=h["has_areas"], blocker=None, evidence=None)
+               area_break=None, area_detail=None, has_areas=h["has_areas"], blocker=None, evidence=None, split_ok=None)
     if h["has_areas"]:
         amem = {g: [r for r in rows if r["areas"] and area_group(len(r["areas"])) == g] for g in AREA_GROUPS}
         out["area_break"], out["area_detail"] = find_break(AREA_GROUPS, amem)
@@ -192,10 +209,10 @@ def analyse(h):
         out["blocker"] = (f"history is too thin around the break point {size_break}: {lower} finished tasks below it "
                           f"and {upper} at or above it, and each side needs {MIN_SIDE}")
         return out
-    ok, text = split_evidence(rows, size_break)
-    out["evidence"] = text
+    ok, text = split_evidence(rows, size_break, tz)
+    out["evidence"], out["split_ok"] = text, ok
     if ok is False:
-        out["blocker"] = f"past splits were not faster in total than single tasks of the same size: {text}"
+        out["blocker"] = f"past splits were not at least {SPLIT_GAIN:.0%} faster in total than single tasks of the same size: {text}"
     return out
 
 
@@ -288,20 +305,20 @@ def report(plan, hist, an, cfg, out=print):
     else:
         out(f"History: {an['n']} finished tasks (data up to {an['newest']:%Y-%m-%d}).")
         out("Spread of the 80% range by size, in log work hours (equal at every size when the range is a fixed share of the duration):")
-        for g, n, w, vis, ratio, ci in an["size_detail"]:
+        for g, n, w, vis, ratio, ci, fl in an["size_detail"]:
             if w is None or not vis:
                 out(f"  {g:2} n={n}" + ("  (too few tasks or people to show)" if n else ""))
             else:
-                jmp = f"  x{ratio:.1f} vs the bucket below (90% interval {ci[0]:.1f}-{ci[1]:.1f})" if ratio else ""
-                out(f"  {g:2} n={n}  spread {w:.2f}{jmp}")
+                jmp = f"  x{ratio:.1f} vs the bucket below (90% interval {ci[0]:.1f}-{ci[1]:.1f})" if ratio is not None else ""
+                out(f"  {g:2} n={n}  spread {w:.2f}{jmp}" + (f"  (10th percentile under the {FLOOR_H} h floor: not compared)" if fl else ""))
         out(f"Break point by size: {an['size_break'] or 'none'}.")
         if an["has_areas"]:
             out(f"Break point by number of areas: {an['area_break'] or 'none'}.")
         else:
             out("No area data in this history (pass --profiles from classify): the advice uses size only.")
         if an["evidence"]:
-            out(f"Past splits: {an['evidence']}." if an["blocker"] or "took a median" in an["evidence"]
-                else f"Past splits could not be checked: {an['evidence']}.")
+            out(f"Past splits could not be checked: {an['evidence']}." if an["split_ok"] is None
+                else f"Past splits: {an['evidence']}.")
     merge = merge_pairs(plan, cfg)
     for t in plan:
         v, why, sl = verdict(t, plan, an, merge, hist, cfg)
@@ -349,7 +366,7 @@ def main(argv=None):
     tasks = a.tasks or str(data / f"{cfg.get('repo', 'local/repo').split('/')[-1]}.tasks.jsonl")
     tz = ZoneInfo(cfg.get("timezone", "UTC"))
     hist = load_history(tasks, tz, cfg, a.profiles)
-    report(read_plan(a), hist, analyse(hist) if hist else None, cfg)
+    report(read_plan(a), hist, analyse(hist, tz) if hist else None, cfg)
     return 0
 
 

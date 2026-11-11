@@ -825,6 +825,9 @@ class SimulatedScenarios(unittest.TestCase):
                 self.assertNotIn("Not enough history", small)
 
 
+T0 = datetime(2024, 1, 1, 9, tzinfo=timezone.utc)
+
+
 class SizingAdvisor(unittest.TestCase):
     """The advisor on histories with a known break point, on the same seeds as the other scenarios."""
     SEEDS = range(7, 12)
@@ -838,7 +841,7 @@ class SizingAdvisor(unittest.TestCase):
         path = Path(tmp.name) / "tasks.jsonl"
         simulate.write_rows(generated, path)
         hist = advise.load_history(str(path), UTC, {})
-        return hist, advise.analyse(hist), simulate.PLANS.get(name, [])
+        return hist, advise.analyse(hist, UTC), simulate.PLANS.get(name, [])
 
     def verdicts(self, name, seed, plan=None, history=True, **kw):
         hist, an, default_plan = self.world(name, seed, **kw)
@@ -874,6 +877,12 @@ class SizingAdvisor(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.assertIsNone(self.world("size-matters", seed)[1]["size_break"])
 
+    def test_small_quick_tasks_with_a_wide_relative_spread_show_no_break(self):
+        # medians 0.5-2 h, sigma 1.2 at every size: the shape of a library of quick fixes
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self.assertIsNone(self.world("small-tasks", seed)[1]["size_break"])
+
     def test_smooth_widths_give_no_advice_for_large_tasks(self):
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
@@ -886,10 +895,11 @@ class SizingAdvisor(unittest.TestCase):
     def test_thin_history_gives_no_advice_and_says_so(self):
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
-                self.assertEqual(self.world("thin-advisor", seed)[1]["size_break"], "XL")
+                # 15 XL tasks find the break only most of the time; the answer is No advice either way
+                found = self.world("thin-advisor", seed)[1]["size_break"]
                 verdict, why, _ = self.verdicts("thin-advisor", seed)["big"]
                 self.assertEqual(verdict, "No advice")
-                self.assertIn("too thin", why)
+                self.assertIn("too thin" if found else "no size bucket", why)
 
     def test_only_the_same_area_pair_of_small_tasks_merges(self):
         for seed in self.SEEDS:
@@ -900,17 +910,42 @@ class SizingAdvisor(unittest.TestCase):
                                      {"a": "Merge", "b": "Merge", "c": "Keep", "d": "Keep", "e": "Keep"})
 
     @staticmethod
-    def rows(sigma, scale=10.0, n=60, authors=3):
-        """Hours with a fixed lognormal shape: the 80% range is the same fraction of `scale` for a given sigma."""
+    def rows(sigma, scale=10.0, n=60, authors=3, zeros=0.0):
+        """Hours with a fixed lognormal shape: the 80% range is the same fraction of `scale` for a given sigma.
+        The first `zeros` share of the tasks took no time."""
         import math
         z = [-2 + 4 * i / (n - 1) for i in range(n)]
-        return [dict(y=scale * math.exp(sigma * zi), author=LOGINS[i % authors]) for i, zi in enumerate(z)]
+        return [dict(y=0.0 if i < zeros * n else scale * math.exp(sigma * zi), author=LOGINS[i % authors])
+                for i, zi in enumerate(z)]
 
     def test_a_break_is_a_wider_relative_spread_not_a_longer_task(self):
         for scale, sigma, expect in ((100, 0.3, None), (1000, 0.3, None), (10, 0.9, "S")):
             with self.subTest(scale=scale, sigma=sigma):
                 members = {"XS": self.rows(0.3), "S": self.rows(sigma, scale)}
                 self.assertEqual(advise.find_break(["XS", "S"], members)[0], expect)
+
+    def test_tiny_durations_and_zero_hour_tasks_do_not_fake_a_break(self):
+        # the same sigma at 0.5 h and 5 h, with 30% of tasks at zero hours: the 10th percentile is under
+        # the floor in both, and the pair is not compared
+        for sigma in (0.5, 1.2):
+            with self.subTest(sigma=sigma):
+                members = {"XS": self.rows(sigma, 0.5, zeros=0.3), "S": self.rows(sigma, 5.0, zeros=0.3)}
+                brk, detail = advise.find_break(["XS", "S"], members)
+                self.assertIsNone(brk)
+                self.assertTrue(detail[0][6] and detail[1][6])
+
+    def test_the_same_sigma_at_half_an_hour_and_five_hours_is_not_a_break(self):
+        members = {"XS": self.rows(0.8, 0.5, zeros=0.3), "S": self.rows(0.8, 5.0, zeros=0.3)}
+        self.assertIsNone(advise.find_break(["XS", "S"], members)[0])
+        members = {"XS": self.rows(0.5, 0.6), "S": self.rows(0.5, 6.0)}   # p10 just above the floor
+        self.assertIsNone(advise.find_break(["XS", "S"], members)[0])
+
+    def test_a_floored_bucket_is_marked_in_the_report(self):
+        members = {g: self.rows(0.8, 0.5, zeros=0.3) for g in ("XS", "S")}
+        hist = dict(rows=[dict(r, size=g, areas=None) for g in ("XS", "S") for r in members[g]], newest=T0, has_areas=False)
+        out = []
+        advise.report([], hist, advise.analyse(hist, UTC), {}, out.append)
+        self.assertIn("floor: not compared", "\n".join(out))
 
     def test_a_jump_inside_the_bootstrap_interval_is_not_a_break(self):
         # 8 tasks per bucket: a x1.8 spread is plausible noise at that size
@@ -935,15 +970,36 @@ class SizingAdvisor(unittest.TestCase):
         advise.report([dict(t) for t in plan], hist, an, {}, out.append)
         self.assertIn("Past splits could not be checked: this history has no parent links", "\n".join(out))
 
-    def test_past_splits_are_judged_on_the_summed_hours_of_their_slices(self):
-        def sets(hours_each):
-            rows = [dict(code_lines=2000, y_raw=hours_each, size="L", parent=k // 3) for k in range(15)]
-            return rows + [dict(code_lines=6000, y_raw=20.0, size="XL", parent=None) for _ in range(6)]
-        for hours_each, faster in ((5.0, True), (9.0, False)):
+    @staticmethod
+    def split_rows(hours_each, singles=20.0, lone_parents=0):
+        """5 splits of 3 L tasks that ran in parallel (so the wall-clock span is one task's hours), and 6 single XL tasks."""
+        def row(code, y, size, parent, h):
+            return dict(code_lines=code, y_raw=y, size=size, parent=parent, start=T0, end=T0 + timedelta(hours=h))
+        rows = [row(2000, hours_each, "L", k // 3, hours_each) for k in range(15)]
+        rows += [row(6000, singles, "XL", None, singles) for _ in range(6)]
+        return rows + [row(6000, 100.0, "XL", 900 + k, 100.0) for k in range(lone_parents)]
+
+    def test_past_splits_are_judged_on_the_summed_hours_not_the_span(self):
+        # 3 x 9 h of work that ran side by side spans only 9 h, which would beat a 20 h single task
+        for hours_each, state in ((5.0, True), (9.0, False)):
             with self.subTest(hours_each=hours_each):
-                ok, text = advise.split_evidence(sets(hours_each), "XL")
-                self.assertIs(ok, faster)
-                self.assertIn(f"took a median of {3 * hours_each:.1f} work hours in total", text)
+                ok, text = advise.split_evidence(self.split_rows(hours_each), "XL", UTC)
+                self.assertIs(ok, state)
+                self.assertIn(f"took a median of {3 * hours_each:.1f} work hours in total (wall-clock span {hours_each:.1f})", text)
+
+    def test_splits_must_beat_single_tasks_by_a_fifth(self):
+        for hours_each, state in ((5.2, True), (5.5, False)):   # 15.6 h is 22% under 20 h, 16.5 h is 17.5% under
+            with self.subTest(hours_each=hours_each):
+                self.assertIs(advise.split_evidence(self.split_rows(hours_each), "XL", UTC)[0], state)
+
+    def test_a_parent_with_one_child_counts_as_a_single_task(self):
+        ok, text = advise.split_evidence(self.split_rows(5.0, lone_parents=7), "XL", UTC)
+        self.assertIs(ok, True)
+        self.assertIn("against 100.0 for single", text)
+
+    def test_with_no_parent_links_the_state_is_unchecked(self):
+        rows = [dict(r, parent=None) for r in self.split_rows(5.0)]
+        self.assertIsNone(advise.split_evidence(rows, "XL", UTC)[0])
 
     def test_output_names_the_break_the_ordering_rule_and_hides_small_groups(self):
         hist, an, plan = self.world("break-point", 7)
@@ -955,7 +1011,7 @@ class SizingAdvisor(unittest.TestCase):
         self.assertIn("No area data", text)
         two = dict(hist, rows=[dict(r, author=LOGINS[i % 2]) for i, r in enumerate(hist["rows"])])
         out = []
-        advise.report([dict(t) for t in plan], two, advise.analyse(two), {}, out.append)
+        advise.report([dict(t) for t in plan], two, advise.analyse(two, UTC), {}, out.append)
         self.assertIn("too few tasks or people to show", "\n".join(out))
         self.assertNotRegex("\n".join(out), r"median [\d.]+ h, n=")
 

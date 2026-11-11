@@ -140,11 +140,11 @@ range.
 $ cc-estimate advise --plan sim/plan.jsonl
 History: 283 finished tasks (data up to 2024-02-08).
 Spread of the 80% range by size, in log work hours (equal at every size when the range is a fixed share of the duration):
-  XS n=55  spread 0.58
-  S  n=59  spread 0.44  x0.8 vs the bucket below (90% interval 0.6-1.0)
-  M  n=55  spread 0.62  x1.4 vs the bucket below (90% interval 1.2-1.7)
-  L  n=59  spread 0.53  x0.9 vs the bucket below (90% interval 0.7-1.1)
-  XL n=55  spread 1.77  x3.4 vs the bucket below (90% interval 2.4-4.0)
+  XS n=55  spread 0.70
+  S  n=59  spread 0.53  x0.7 vs the bucket below (90% interval 0.6-0.9)
+  M  n=55  spread 0.71  x1.4 vs the bucket below (90% interval 1.1-1.7)
+  L  n=59  spread 0.60  x0.8 vs the bucket below (90% interval 0.7-1.1)
+  XL n=55  spread 2.02  x3.4 vs the bucket below (90% interval 2.4-4.1)
 Break point by size: XL.
 No area data in this history (pass --profiles from classify): the advice uses size only.
 Past splits could not be checked: this history has no parent links between tasks, so past splits cannot be found.
@@ -162,24 +162,34 @@ mid (L): Keep. L is below the break point XL.
 ```
 
 Read it from the top. The table is the spread of the 80% range for each size, in log work hours:
-log(p90 + 1) - log(p10 + 1). Because it is a log, a range that is a fixed share of the duration has
-the same spread at every size, so longer tasks are not flagged merely for having wider ranges in
-hours. Next to each spread is the ratio to the size below and its bootstrap 90% interval (each
-bucket resampled 500 times with a fixed seed). The break point is the first size whose whole
-interval lies above 1.5: here XL, where the spread is 3.4 times that at L. A task at that size or
-above is a candidate for splitting. A bucket with fewer than five tasks or three authors is not
-compared.
+log(p90) - log(p10). Because it is a log, a range that is a fixed share of the duration has the same
+spread at every size, so longer tasks are not flagged merely for having wider ranges in hours.
+Durations under 0.25 hours count as 0.25, since a log of zero or of a few minutes says nothing. A
+size whose 10th percentile is under that floor has no measured lower end: it is marked "not
+compared" and takes no part in finding a break. Next to each spread is the ratio to the size below
+and its bootstrap 90% interval (each bucket resampled 500 times with a fixed seed). The break point
+is the first size whose interval has its lower end above 1.5: here XL, where the spread is 3.4
+times that at L. A task at that size or above is a candidate for splitting. A bucket with fewer
+than five tasks or three authors is not compared.
+
+How reliable the break is: in 100 made-up worlds per case (lognormal durations, median 6 hours),
+a 3x jump in spread at the third of three sizes was named in all 100 with 60 tasks per size, and in
+54 with 15 tasks at the top size. A 2x jump was named in 46 of 100 with 60 tasks. With no jump it
+was never named. So a break is reliably named only for roughly a 3x jump at about 60 tasks; a miss
+gives No advice, never a wrong split.
 
 The "Past splits" line says whether splitting has paid off in this history. A split is several tasks
 with the same `parent` link (a sub-issue); the line compares the SUM of the slices' working hours
-with single tasks of the same combined size. No source writes parent links yet (issue #22), so the
-line says past splits could not be checked, and the verdict rests on the break point alone.
+with single tasks of the same combined size, and shows the splits' wall-clock span beside it
+without using it. Splits must take at least 20% less total work to count as paid off. A parent with
+one child is a single task. No source writes parent links yet (issue #22), so the line says past
+splits could not be checked, and the verdict rests on the break point alone.
 
 The advice stops at No advice when:
 
 - no size has an interval wholly above 1.5 ("no size bucket has an 80% range clearly wider");
 - fewer than 20 finished tasks lie on either side of the break ("too thin");
-- past splits are on record and took more total work hours than single tasks.
+- past splits are on record and did not take at least 20% fewer total work hours than single tasks.
 
 Slices are ordered by the layer rule: docs and tests are recognised first, then each path is matched
 against the layer patterns (`advise.layers` in the config, or the defaults), and the layers run
@@ -215,11 +225,12 @@ your own estimates.
   an exact number: in `size-matters` the size rows cover 70-90% and beat the baseline's Winkler score by
   at least 15%; in `null` they land within 5% of it; in `test-heavy` each test-heavy task is sized by its
   product code and flagged, and no other task is; in `thin` (27 S and 3 L tasks) `backtest` refuses and
-  `estimate` gives a size range for S and the size-blind range for L. Four advisor scenarios check
+  `estimate` gives a size range for S and the size-blind range for L. Five advisor scenarios check
   `advise`: `break-point` (only XL has a wider relative spread; XL named as the break, only the XL task
   split, slices cover every file and each is below the break), `no-break` (the same relative spread at
-  every size: no advice, as in `size-matters` on seeds 7-11), `thin-advisor` (15 XL tasks: no advice,
-  history too thin) and `merge-keep` (only the same-area pair merges).
+  every size: no advice, as in `size-matters` on seeds 7-11), `small-tasks` (medians of 0.5-2 hours and
+  sigma 1.2 at every size: no break), `thin-advisor` (15 XL tasks: always No advice, "too thin" when a
+  break is found) and `merge-keep` (only the same-area pair merges).
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
 - **Mutation probe.** `python3 tests/mutation_probe.py` plants known bugs one at a time (a

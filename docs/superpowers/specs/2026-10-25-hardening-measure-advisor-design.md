@@ -48,13 +48,13 @@ would tell every change to split. The measure is fixed first.
 tasks with paths and size).
 
 - **Split** when the task is above the history's *break point*: the smallest size bucket or area
-  count at which the 80% range, relative to the duration (log hours), is clearly wider than in the bucket below (the bootstrap 90% interval of the ratio lies above 1.5). Slices
+  count at which the 80% range, relative to the duration (log hours), is clearly wider than in the bucket below (the lower end of the bootstrap 90% interval of the ratio is above 1.5; durations floored at 0.25 hours). Slices
   follow area boundaries in dependency order (shared code, then the services using it, then UI,
   then docs), each with its own estimate.
 - **Merge** when two planned tasks are both XS or S and touch the same area.
 - **Keep** otherwise.
 - **No advice** when history has fewer than 20 tasks on either side of the break point, or when
-  past splits (tasks sharing a parent link) took more total work hours than single tasks of the same total size. Without parent links the advice rests on the break alone and says past splits could not be checked.
+  past splits (tasks sharing a parent link) did not take at least 20% fewer total work hours than single tasks of the same total size. Without parent links the advice rests on the break alone and says past splits could not be checked.
 - The backtest of the advisor: for past tasks above the break point, compare the summed working hours of
   sets of tasks under one parent link with single tasks of the same total size.
 
@@ -98,6 +98,7 @@ window in `drift`, and the product-code bucket in `test-heavy`.
 | steady | no change over time, wide spread | `backtest` picks "all", so a fixed 90-day choice fails; `estimate` uses it and covers 70–90% of fresh tasks |
 | test-heavy | a third of tasks are M by product code and carry 5× that in tests, enough to make them XL if tests counted | each lands in the bucket of its product-code size and is flagged test-heavy; no other task is flagged |
 | break-point | the relative spread is 3× wider at XL than at L; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break |
+| small-tasks | medians of 0.5–2 hours, the same wide relative spread at every size | the advisor finds no break |
 | no-break | the same relative spread at every size; 60 tasks per bucket | the advisor gives no advice |
 | thin-advisor | a break at XL, 15 XL tasks | the advisor gives no advice and says history is too thin |
 | merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |

@@ -112,18 +112,18 @@ SIZE_NAMES = list(SIZE_LINES)
 MEDIANS = dict(zip(SIZE_NAMES, (4.0, 4.8, 5.8, 6.9, 8.3)))
 SIGMAS = dict.fromkeys(SIZE_NAMES, 0.3)
 BREAK_SIGMAS = {**SIGMAS, "XL": 0.9}
-# 15 XL tasks sample the spread noisily, so that world widens XL further.
-THIN_SIGMAS = {**SIGMAS, "XL": 1.3}
+SMALL_MEDIANS = dict(zip(SIZE_NAMES, (0.5, 0.8, 1.2, 1.6, 2.0)))  # minutes-to-hours tasks, as in a library with quick fixes
+SMALL_SIGMAS = dict.fromkeys(SIZE_NAMES, 1.2)
 
 
-def advisor_world(rnd, sigmas, xl=60):
+def advisor_world(rnd, sigmas, xl=60, medians=MEDIANS, base=MIN_HOURS):
     """60 single tasks per size (`xl` of XL), shuffled so sizes interleave over time."""
     specs = []
     for size in SIZE_NAMES:
         for _ in range(xl if size == "XL" else 60):
             code = rnd.randint(*SIZE_LINES[size])
             tests, docs = side_lines(rnd, code)
-            specs.append(dict(code=code, tests=tests, docs=docs, hours=MIN_HOURS + lognormal(rnd, MEDIANS[size], sigmas[size])))
+            specs.append(dict(code=code, tests=tests, docs=docs, hours=base + lognormal(rnd, medians[size], sigmas[size])))
     rnd.shuffle(specs)
     return specs
 
@@ -142,11 +142,18 @@ def no_break(rnd, n):
         params=dict(medians=MEDIANS, sigmas=SIGMAS, break_size=None))
 
 
+def small_tasks(rnd, n):
+    """60 tasks per size, medians 0.5-2 hours, sigma 1.2 at every size: a wide spread that is the same share of the duration."""
+    return advisor_world(rnd, SMALL_SIGMAS, medians=SMALL_MEDIANS, base=0.05), dict(
+        model="hours = 0.05 + median[size] * lognormal(sigma 1.2), medians 0.5-2 hours, the same sigma at every size",
+        params=dict(medians=SMALL_MEDIANS, sigmas=SMALL_SIGMAS, break_size=None))
+
+
 def thin_advisor(rnd, n):
     """A break at XL, but only 15 XL tasks."""
-    return advisor_world(rnd, THIN_SIGMAS, xl=15), dict(
-        model="as break-point with 15 XL tasks instead of 60, and XL sigma 1.3 instead of 0.9",
-        params=dict(medians=MEDIANS, sigmas=THIN_SIGMAS, break_size="XL", xl_tasks=15))
+    return advisor_world(rnd, BREAK_SIGMAS, xl=15), dict(
+        model="as break-point with 15 XL tasks instead of 60",
+        params=dict(medians=MEDIANS, sigmas=BREAK_SIGMAS, xl_tasks=15))
 
 
 def merge_keep(rnd, n):
@@ -169,12 +176,12 @@ MERGE_KEEP_PLAN = [
     dict(id="d", size="XS", paths=["scripts/release.sh"]),
     dict(id="e", size="M", paths=["src/lib/money.py", "src/lib/dates.py"]),
 ]
-PLANS = {"break-point": SPLIT_PLAN, "no-break": SPLIT_PLAN, "thin-advisor": SPLIT_PLAN, "merge-keep": MERGE_KEEP_PLAN}
+PLANS = {"break-point": SPLIT_PLAN, "no-break": SPLIT_PLAN, "small-tasks": SPLIT_PLAN, "thin-advisor": SPLIT_PLAN, "merge-keep": MERGE_KEEP_PLAN}
 
 # name -> (function, default task count)
 SCENARIOS = {"size-matters": (size_matters, 800), "null": (null, 800), "test-heavy": (test_heavy, 400),
              "thin": (thin, 30), "break-point": (break_point, 0), "no-break": (no_break, 0),
-             "thin-advisor": (thin_advisor, 0), "merge-keep": (merge_keep, 0)}
+             "small-tasks": (small_tasks, 0), "thin-advisor": (thin_advisor, 0), "merge-keep": (merge_keep, 0)}
 
 
 def generate(name, seed, n=None):
