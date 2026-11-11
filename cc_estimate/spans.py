@@ -7,7 +7,7 @@ Export the periods when a work item was not being worked on (a Jira "Blocked" st
 import argparse, csv, json, sys
 from pathlib import Path
 from collections import defaultdict
-from .files import open_out
+from .files import open_out, read_since, write_since
 
 
 def merge(tasks, rows):
@@ -38,6 +38,7 @@ def main(argv=None):
     with open_out(a.out) as f:
         for t in tasks:
             f.write(json.dumps(t) + "\n")
+    write_since(a.out, read_since(a.tasks))
     print(f"spans added to {hit} of {len(tasks)} tasks", file=sys.stderr)
 
 

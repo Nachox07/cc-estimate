@@ -66,12 +66,15 @@ will trigger. This is context; it doesn't change the number.
 - Tasks that started before the window are dropped, since only the long-lived ones reach it. The
   window starts at the earliest task end, or at `--since`.
 - Tasks that started near the end of the data are dropped, since only their fast siblings have
-  finished. "Near" is learned: a horizon H, at least 21 days and at most half the window, equal to
+  finished. "Near" is learned: a horizon H, at least 21 days and at most max(21, half the window), equal to
   the 90th percentile of calendar duration among tasks that started at least H days before the data
   end (found by iteration). Long tasks are weighted up by how likely they were to have finished,
   using the observed spread of start times. This is valid when the window is at least about 4x the
   true 90th percentile: a task longer than the whole window is never fetched, so on a shorter
-  window H reads low and `backtest` prints a warning. With fewer than 3 long tasks to weight from,
+  window H reads low. `backtest` and `estimate` always print H, its cap and how many observed tasks
+  lie above it, and add a warning when H reaches half its cap (the 4x limit) or hits the cap. The
+  warning is a heuristic: it fires in roughly 70% of ~70-task histories with a long tail (sigma
+  1.8, 120-day window), so a short window can still go unflagged. With fewer than 3 long tasks to weight from,
   the plain 90th percentile is used instead and a note says so. Tasks that ended at their last
   commit rather than a merge (git-only source) are left out of this estimate, since they are cut
   short. `--censor-days` sets H by hand. H is learned on the whole window, locked slice included
@@ -83,8 +86,11 @@ will trigger. This is context; it doesn't change the number.
   A key reused from long ago (an old "refs #123") drops today's task with it.
 - On GitHub, `links` records each closing issue's earliest merged closing PR from this repo, and
   `tasks` drops a task whose issue had a PR merged before the fetch `--since` (its first PR is not in
-  the data, so it would start late). `links` and `tasks` save the fetch `--since` (as midnight UTC)
-  beside their output, the same way `git-tasks` does. Links files fetched before this need re-fetching.
+  the data, so it would start late). `fetch`, `links`, `tasks` and `spans` save the fetch `--since`
+  (as midnight UTC) beside their output, the same way `git-tasks` does; a rerun without one writes
+  `null` rather than leaving an old file. `tasks` takes the later of the `fetch` and `links` values
+  and warns if they differ or `links` has none. Links files fetched before this need re-fetching.
+  A date-only `git-tasks --since` also means UTC midnight.
 
 The `size` rows assume you name the final size before you start, so they are a best case. Logged
 estimates (`--log`, then `score`) measure what you actually achieve. A backtest needs at least 40

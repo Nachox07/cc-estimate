@@ -123,10 +123,11 @@ before the earliest task end are left out, because only the long-lived ones of t
 file. Tasks that started within the last stretch of the data are left out too, because only the quick
 ones among them have finished. That stretch is the horizon H: the 90th percentile of calendar
 duration among tasks that started at least H days before the data end (found by iteration), never
-less than 21 days and never more than half the window. Long tasks are weighted up by the chance they
+less than 21 days and never more than max(21, half the window). Long tasks are weighted up by the chance they
 had finished, taken from the observed start times. It is valid when the window is at least about 4x
-the true 90th percentile; on a shorter one it reads low and a warning is printed. The window start is
-the `--since` that `git-tasks` recorded beside the tasks file, else the earliest task end.
+the true 90th percentile; on a shorter one it reads low. `backtest` and `estimate` print H, its cap and the count of
+observed tasks above it, and warn when H reaches half its cap; the warning is a heuristic and can miss. The window start is
+the `--since` that `git-tasks` recorded beside the tasks file (`tasks` and `spans` write one too), else the earliest task end.
 
 With a `classifier` in the config, `--paths` adds what the change will go through, for example
 which approval groups and test suites the paths trigger. That is context; it does not change the

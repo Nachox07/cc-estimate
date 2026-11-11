@@ -14,7 +14,8 @@ LABEL_EVENTS = """labelEvents: timelineItems(first: 50, itemTypes: [LABELED_EVEN
   __typename ... on LabeledEvent { createdAt label { name } } ... on UnlabeledEvent { createdAt label { name } } } }"""
 FIELDS = """number baseRefName headRefName title body createdAt mergedAt author { login } %s
 closingIssuesReferences(first: 10) { nodes { number createdAt title closedAt
-  closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { nodes { number mergedAt repository { nameWithOwner } } }
+  id closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { totalCount pageInfo { hasNextPage endCursor }
+    nodes { number mergedAt repository { nameWithOwner } } }
   labels(first: 30) { nodes { name } } %s
   timelineItems(first: 10, itemTypes: [ASSIGNED_EVENT]) { nodes { ... on AssignedEvent { createdAt } } } } }""" % (LABEL_EVENTS, LABEL_EVENTS)
 DEFAULT_EXCLUDED = {"blocked": ["blocked"]}
@@ -24,6 +25,11 @@ Q = """query($q: String!, $n: Int!, $cursor: String) {
   search(query: $q, type: ISSUE, first: $n, after: $cursor) {
     issueCount pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest { %s } } } }""" % FIELDS
+
+MORE_Q = """query($id: ID!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
+  node(id: $id) { ... on Issue { closedByPullRequestsReferences(first: 50, after: $cursor, includeClosedPrs: true) {
+    pageInfo { hasNextPage endCursor } nodes { number mergedAt repository { nameWithOwner } } } } } }"""
 
 REF = re.compile(r"(?i)\b(?:closes|fixes|resolves|refs|part of|relates to|tracking)\s*:?\s*#(\d+)")
 PICK = re.compile(r"(?i)(?:cherry[- ]?pick(?:ed)?(?: of| from)?|carry(?:ing)?|backport(?: of)?)\D{0,20}#(\d+)")
@@ -47,6 +53,16 @@ def window(repo, since, until, ttl):
         print(f"::warning:: {q}: reported {count}, fetched {len(out)}", file=sys.stderr)
     print(f"  {since}..{until}: {len(out)}", file=sys.stderr)
     return out
+
+
+def complete_closing(issue, ttl=None):
+    """Page through an issue's closing PRs when it has more than the first 20."""
+    conn = issue.get("closedByPullRequestsReferences") or {}
+    while (conn.get("pageInfo") or {}).get("hasNextPage"):
+        page = h.gh_graphql(MORE_Q, {"id": issue["id"], "cursor": conn["pageInfo"]["endCursor"]}, "closing", ttl)
+        more = page["data"]["node"]["closedByPullRequestsReferences"]
+        conn["nodes"] = (conn.get("nodes") or []) + (more.get("nodes") or [])
+        conn["pageInfo"] = more["pageInfo"]
 
 
 def label_spans(events, close_at, names):
@@ -112,6 +128,8 @@ def main(argv=None):
         d = e + timedelta(days=1)
     seen = {}
     for n in rows:
+        for i in (n.get("closingIssuesReferences") or {}).get("nodes") or []:
+            complete_closing(i)
         seen[n["number"]] = record(n, groups, cfg.get("default_branch", "main"), a.repo)
     with open_out(a.out) as f:
         for r in sorted(seen.values(), key=lambda r: r["number"]):

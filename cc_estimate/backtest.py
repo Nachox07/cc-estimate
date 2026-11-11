@@ -114,6 +114,7 @@ def load(path, tz, cfg=None, profiles=None):
 MIN_CENSOR_DAYS = 21
 MAX_ITER = 50
 MIN_ABOVE = 3      # observed tasks above the p90 needed to trust the weights
+HEAVY_CAP_SHARE = 0.5  # H/cap of 0.5 is the window = 4x p90 limit; above it H reads low
 HEAVY_SHARE = 0.05  # weight share of tasks longer than half the window that triggers a warning
 
 
@@ -122,7 +123,8 @@ def horizon(rows, w0, data_end):
     Such a task longer than H is seen only if it started early enough, so it is weighted by 1 / F(data_end - d),
     F being the start-time CDF of the tasks not longer than H (all of them seen); unweighted, the fixed point
     sits below the true p90. Valid while the window is at least ~4x the true p90: a task longer than the whole
-    window is never fetched. H is capped at half the window. Returns (H, notes)."""
+    window is never fetched. H is capped at max(21, half the window). Returns (H, notes); the first note is
+    always the summary line."""
     span = (data_end - w0).total_seconds() / 86400
     pts = sorted(((r["start"] - w0).total_seconds() / 86400, (r["end"] - r["start"]).total_seconds() / 86400) for r in rows)
     cap = max(MIN_CENSOR_DAYS, span / 2)
@@ -141,33 +143,46 @@ def horizon(rows, w0, data_end):
             out.append((d, w))
         return out
 
-    def fixed(weighted):
-        h, seen = MIN_CENSOR_DAYS, []
-        for _ in range(MAX_ITER):
+    def step(weighted):
+        def go(h):
             pairs = sample(h, weighted)
-            nxt = round(min(cap, max(MIN_CENSOR_DAYS, wq(pairs, 0.9))) if pairs else MIN_CENSOR_DAYS, 2)
-            if abs(nxt - h) < 0.01:
-                return nxt, True
-            if nxt in seen:  # a cycle: take its smallest value
-                return min(seen[seen.index(nxt):]), False
-            seen.append(nxt)
-            h = nxt
-        return h, False
+            return round(min(cap, max(MIN_CENSOR_DAYS, wq(pairs, 0.9))), 2) if pairs else MIN_CENSOR_DAYS
+        return go
 
     notes = []
-    h, ok = fixed(True)
-    pairs = sample(h, True)
+    wh, ok = settle(step(True))
+    wpairs = sample(wh, True)
+    h, pairs = wh, wpairs
     if sum(d > h for d, _ in pairs) < MIN_ABOVE:
-        h, ok = fixed(False)
+        h, ok = settle(step(False))
         pairs = sample(h, False)
         notes.append(f"horizon: fewer than {MIN_ABOVE} observed tasks above the weighted p90, so the unweighted p90 is used")
+    notes.insert(0, f"horizon: {h:.1f} days (cap {cap:.1f}); {sum(d > h for d, _ in pairs)} observed tasks above it")
     if not ok:
         notes.append(f"horizon: the iteration did not settle; using {h:.1f} days")
-    total = sum(w for _, w in pairs)
-    if total and sum(w for d, w in pairs if d > span / 2) / total > HEAVY_SHARE:
-        notes.append("horizon: tasks longer than half the window carry much of the weight; the window is too short "
-                     "for this history, so the horizon is probably too low")
+    if wh >= cap - 0.01:
+        notes.append(f"horizon: the weighted horizon hit its cap of {cap:.1f} days")
+    short = ("the window is too short for this history, so the horizon is probably too low")
+    total = sum(w for _, w in wpairs)
+    if wh >= HEAVY_CAP_SHARE * cap:
+        notes.append(f"horizon: the weighted horizon {wh:.1f} days is at least {HEAVY_CAP_SHARE:.0%} of its cap; {short}")
+    elif total and sum(w for d, w in wpairs if d > span / 2) / total > HEAVY_SHARE:
+        notes.append(f"horizon: tasks longer than half the window carry much of the weight; {short}")
     return h, notes
+
+
+def settle(step, h=MIN_CENSOR_DAYS):
+    """Iterate h -> step(h) to a fixed point. On a cycle, return its smallest value and False."""
+    seen = []
+    for _ in range(MAX_ITER):
+        nxt = step(h)
+        if abs(nxt - h) < 0.01:
+            return nxt, True
+        if nxt in seen:
+            return min(seen[seen.index(nxt):]), False
+        seen.append(nxt)
+        h = nxt
+    return h, False
 
 
 def wq(pairs, p):

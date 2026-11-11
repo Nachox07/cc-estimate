@@ -55,6 +55,8 @@ def merges(repo_dir, branch, since):
 
 def since_epoch(repo_dir, since):
     """The instant git reads `since` as, so every query and the sidecar agree on one left edge."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):  # git would add the current time of day; links read dates as UTC midnight
+        return int(datetime.fromisoformat(since + "T00:00:00+00:00").timestamp())
     out = subprocess.run(["git", "-C", repo_dir, "rev-parse", f"--since={since}"], capture_output=True, text=True).stdout
     m = re.search(r"--max-age=(\d+)", out)
     if not m:
@@ -69,7 +71,7 @@ def older_keys(repo_dir, branch, since, patterns, ignore_re=None, wanted=None):
     fmt = UNIT.join(["%ae", "%s", "%b"]) + REC
     proc = subprocess.Popen(["git", "-C", repo_dir, "log", branch, "--no-merges", f"--until={since}", f"--format={fmt}"],
                             stdout=subprocess.PIPE, text=True)
-    keys, buf = set(), ""
+    keys, buf, early = set(), "", False
     try:
         for part in iter(lambda: proc.stdout.read(65536), ""):
             *chunks, buf = (buf + part).split(REC)
@@ -78,9 +80,12 @@ def older_keys(repo_dir, branch, since, patterns, ignore_re=None, wanted=None):
                 if not (ignore_re and ignore_re.search(email)):
                     keys.add(find_key(subject + "\n" + body, patterns))
             if wanted is not None and wanted <= keys:
+                early = True
                 break
     finally:
-        proc.kill(); proc.wait(); proc.stdout.close()
+        proc.kill(); code = proc.wait(); proc.stdout.close()
+    if not early and code not in (0, -9):
+        raise subprocess.CalledProcessError(code, "git log")
     return keys - {None}
 
 
