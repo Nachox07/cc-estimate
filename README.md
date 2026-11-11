@@ -130,8 +130,8 @@ so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimat
 
 `cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
 (same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
-Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks), plus five
-for the advisor (`break-point`, `no-break`, `small-tasks`, `thin-advisor`, `merge-keep`), which also
+Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks), plus six
+for the advisor (`break-point`, `weak-break`, `no-break`, `small-tasks`, `thin-advisor`, `merge-keep`), which also
 write a `plan.jsonl`. The tests use them to check that the numbers are right, not only that the code runs.
 
 ## Should this task be split?

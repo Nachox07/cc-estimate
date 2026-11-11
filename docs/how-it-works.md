@@ -172,11 +172,26 @@ is the first size whose interval has its lower end above 1.5: here XL, where the
 times that at L. A task at that size or above is a candidate for splitting. A bucket with fewer
 than five tasks or three authors is not compared.
 
-How reliable the break is: in 100 made-up worlds per case (lognormal durations, median 6 hours),
-a 3x jump in spread at the third of three sizes was named in all 100 with 60 tasks per size, and in
-54 with 15 tasks at the top size. A 2x jump was named in 46 of 100 with 60 tasks. With no jump it
-was never named. So a break is reliably named only for roughly a 3x jump at about 60 tasks; a miss
-gives No advice, never a wrong split.
+How reliable the break is: `python3 tests/break_detection_rate.py` runs the shipped advisor scenarios
+over seeds 0-99. Its output:
+
+```text
+break-point   (3x wider at XL, 60 tasks per size): named XL in 100 of 100 seeds
+weak-break    (2x wider at XL, 60 tasks per size): named XL in 52 of 100 seeds
+thin-advisor  (3x wider at XL, 15 XL tasks): named XL in 50 of 100 seeds
+no-break      (same spread at every size): named a break in 0 of 100 seeds
+small-tasks   (medians 0.5-2 h, same spread at every size): named a break in 0 of 100 seeds
+size-matters  (800 tasks, same spread at every size): named a break in 0 of 100 seeds
+```
+
+So a break is reliably named only for roughly a 3x jump at about 60 tasks; a 2x jump, or a 3x jump
+with 15 tasks, is found about half the time. A miss gives No advice, never a wrong split.
+
+A bucket that is not compared (10th percentile under the floor, or no spread) removes two
+comparisons, the one with the size below and the one with the size above. When some are removed,
+the No advice reason says how many of the four comparisons could not be made, and when none could
+be made it says no size could be compared. The "no break" result in `small-tasks` partly rests on
+such exclusions: over seeds 0-99 the script counts 186 buckets not compared, about two per seed.
 
 The "Past splits" line says whether splitting has paid off in this history. A split is several tasks
 with the same `parent` link (a sub-issue); the line compares the SUM of the slices' working hours
@@ -225,11 +240,11 @@ your own estimates.
   an exact number: in `size-matters` the size rows cover 70-90% and beat the baseline's Winkler score by
   at least 15%; in `null` they land within 5% of it; in `test-heavy` each test-heavy task is sized by its
   product code and flagged, and no other task is; in `thin` (27 S and 3 L tasks) `backtest` refuses and
-  `estimate` gives a size range for S and the size-blind range for L. Five advisor scenarios check
+  `estimate` gives a size range for S and the size-blind range for L. Six advisor scenarios check
   `advise`: `break-point` (only XL has a wider relative spread; XL named as the break, only the XL task
   split, slices cover every file and each is below the break), `no-break` (the same relative spread at
-  every size: no advice, as in `size-matters` on seeds 7-11), `small-tasks` (medians of 0.5-2 hours and
-  sigma 1.2 at every size: no break), `thin-advisor` (15 XL tasks: always No advice, "too thin" when a
+  every size: no advice, as in `size-matters` on seeds 7-11), `weak-break` (a 2x jump: found about half the time, so only checked for a valid outcome),
+  `small-tasks` (medians of 0.5-2 hours and sigma 1.2 at every size: no break), `thin-advisor` (15 XL tasks: always No advice, "too thin" when a
   break is found) and `merge-keep` (only the same-area pair merges).
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.

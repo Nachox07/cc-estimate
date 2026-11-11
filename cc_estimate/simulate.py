@@ -142,6 +142,13 @@ def no_break(rnd, n):
         params=dict(medians=MEDIANS, sigmas=SIGMAS, break_size=None))
 
 
+def weak_break(rnd, n):
+    """As break-point, but XL is only 2x as wide in relative terms: a break the advisor finds about half the time."""
+    return advisor_world(rnd, {**SIGMAS, "XL": 0.6}), dict(
+        model="as break-point with XL sigma 0.6 instead of 0.9",
+        params=dict(medians=MEDIANS, sigmas={**SIGMAS, "XL": 0.6}, break_size="XL"))
+
+
 def small_tasks(rnd, n):
     """60 tasks per size, medians 0.5-2 hours, sigma 1.2 at every size: a wide spread that is the same share of the duration."""
     return advisor_world(rnd, SMALL_SIGMAS, medians=SMALL_MEDIANS, base=0.05), dict(
@@ -176,12 +183,12 @@ MERGE_KEEP_PLAN = [
     dict(id="d", size="XS", paths=["scripts/release.sh"]),
     dict(id="e", size="M", paths=["src/lib/money.py", "src/lib/dates.py"]),
 ]
-PLANS = {"break-point": SPLIT_PLAN, "no-break": SPLIT_PLAN, "small-tasks": SPLIT_PLAN, "thin-advisor": SPLIT_PLAN, "merge-keep": MERGE_KEEP_PLAN}
+PLANS = {"break-point": SPLIT_PLAN, "no-break": SPLIT_PLAN, "weak-break": SPLIT_PLAN, "small-tasks": SPLIT_PLAN, "thin-advisor": SPLIT_PLAN, "merge-keep": MERGE_KEEP_PLAN}
 
 # name -> (function, default task count)
 SCENARIOS = {"size-matters": (size_matters, 800), "null": (null, 800), "test-heavy": (test_heavy, 400),
              "thin": (thin, 30), "break-point": (break_point, 0), "no-break": (no_break, 0),
-             "small-tasks": (small_tasks, 0), "thin-advisor": (thin_advisor, 0), "merge-keep": (merge_keep, 0)}
+             "weak-break": (weak_break, 0), "small-tasks": (small_tasks, 0), "thin-advisor": (thin_advisor, 0), "merge-keep": (merge_keep, 0)}
 
 
 def generate(name, seed, n=None):

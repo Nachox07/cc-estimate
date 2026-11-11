@@ -100,7 +100,8 @@ window in `drift`, and the product-code bucket in `test-heavy`.
 | break-point | the relative spread is 3× wider at XL than at L; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break |
 | small-tasks | medians of 0.5–2 hours, the same wide relative spread at every size | the advisor finds no break |
 | no-break | the same relative spread at every size; 60 tasks per bucket | the advisor gives no advice |
-| thin-advisor | a break at XL, 15 XL tasks | the advisor gives no advice and says history is too thin |
+| weak-break | the relative spread is 2× wider at XL than at L | the advisor names XL about half the time; `tests/break_detection_rate.py` reports the rate |
+| thin-advisor | the relative spread is 3× wider at XL, 15 XL tasks | the advisor gives no advice; it says history is too thin when it finds the break |
 | merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |
 | thin | 30 tasks, 27 of them S and 3 of them L | `backtest` refuses; `estimate --size L` says the size has too little history and gives the size-blind range; `estimate --size S` gives a size range |
 

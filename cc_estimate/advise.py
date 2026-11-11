@@ -7,26 +7,28 @@
 Verdicts: Split, Merge, Keep, No advice. Each comes with one plain sentence saying why.
 
 Break point. For each size bucket with at least 5 finished tasks (and 3 authors, or it is hidden),
-take the spread of its 80% range relative to scale: log(p90) - log(p10) of work hours, each floored at
-FLOOR_H (0.25 h), so a
-spread that is a constant fraction of the duration is the same at every size. The break point is the
-smallest bucket whose spread is wider than the bucket directly below it by more than GROWTH (1.5x),
-with the bootstrap 90% interval of the ratio (each bucket resampled, fixed seed) wholly above GROWTH.
-A bucket whose p10 is under the floor is shown with a note and not compared: its lower end is not measured.
-The same is done by number of areas (1, 2, 3, 4+) when
-`--profiles` (from `classify`) supplies areas; without them the advisor works on size only, and says so.
+take the spread of its 80% range relative to scale: log(p90) - log(p10) of work hours, each floored
+at FLOOR_H (0.25 h), so a spread that is a constant fraction of the duration is the same at every
+size. The break point is the smallest bucket whose spread is wider than the bucket directly below it
+by more than GROWTH (1.5x), with the bootstrap 90% interval of the ratio (each bucket resampled,
+fixed seed) wholly above GROWTH. A bucket whose p10 is under the floor, or whose spread is zero, is
+shown with a note and not compared (nor is the pair it belongs to). If no pair could be compared
+the advisor says so instead of reporting no break. The same is done by number of areas (1, 2, 3,
+4+) when `--profiles` (from `classify`) supplies areas; without them the advisor works on size
+only, and says so.
 
 Split. A task at or above the break point is split, unless the history cannot support it. There is
 no advice when:
   - fewer than 20 finished tasks lie on either side of the break point (by size; by area count for
     the area break), or
-  - past splits were slower. A past split is a set of two or more tasks with the same `parent`
+  - past splits did not pay off. A past split is a set of two or more tasks with the same `parent`
     (a sub-issue link; no source writes it yet, issue #22). Its total is the SUM of the slices'
     working hours, compared with single tasks (no parent) whose product-code size equals the set's
-    summed size. Splitting counts as faster when, over the buckets at or above the break that have
-    at least 3 sets and 3 single tasks, the set medians (weighted by set count) are at least 20% below the
-    single medians, with at least 5 sets overall. Without parent links, or without enough sets, the advice
-    rests on the break rule alone and the report says past splits could not be checked.
+    summed size. Splitting pays off when, over the buckets at or above the break that have
+    at least 3 sets and 3 single tasks, the set medians (weighted by set count) are at least 20%
+    below the single medians, with at least 5 sets overall. Without parent links, or without enough
+    sets, the advice rests on the break rule alone and the report says past splits could not be
+    checked.
 Tasks below the size L get Keep when the break cannot be judged; L and XL get No advice.
 
 Slices. Paths are grouped by layer. Docs and tests are recognised first (the config's
@@ -118,24 +120,24 @@ def jump(prev, cur):
 
 def find_break(groups, members):
     """The first group whose bootstrap 90% interval for spread(group) / spread(group below) has its lower bound
-    above GROWTH. Groups under 5 tasks, hidden for privacy, or with p10 under the floor are not compared (nor is
-    the pair they belong to).
-    detail: (group, n, spread, shown, ratio, interval, floored)"""
+    above GROWTH. Groups under 5 tasks, hidden for privacy, with p10 under the floor or with zero spread are
+    not compared (nor is the pair they belong to).
+    detail: (group, n, spread, shown, ratio, interval, why not compared: "floor", "flat" or None)"""
     prev = None
     detail = []
     for g in groups:
         rs = members[g]
         ys = [r["y"] for r in rs]
         ok = len(rs) >= est.MIN_N and shown(rs)
-        fl = ok and floored(ys)
         w = spread(ys) if ok else None
+        fl = ("floor" if floored(ys) else "flat" if w <= 0 else None) if ok else None
         ratio = ci = None
-        if prev is not None and w is not None and prev[1] is not None and not fl and not prev[3]:
+        if prev is not None and ok and prev[3] is None and not fl and prev[1] is not None:
             ratio, ci = w / prev[1], jump(prev[2], ys)
         detail.append((g, len(rs), w, shown(rs), ratio, ci, fl))
         if ci and ci[0] > GROWTH:
             return g, detail
-        prev = (g, w, ys, fl) if w is not None else (g, None, None, False)
+        prev = (g, w, ys, fl) if ok else (g, None, None, None)
     return None, detail
 
 
@@ -198,9 +200,17 @@ def analyse(h, tz):
     if h["has_areas"]:
         amem = {g: [r for r in rows if r["areas"] and area_group(len(r["areas"])) == g] for g in AREA_GROUPS}
         out["area_break"], out["area_detail"] = find_break(AREA_GROUPS, amem)
+    made = sum(1 for d in size_detail if d[4] is not None)
+    out["compared"] = (made, len(SIZES) - 1)
+    if not size_break and not made:
+        out["blocker"] = ("no size could be compared: each needs 5 finished tasks from 3 people, a 10th percentile "
+                          f"of at least {FLOOR_H} h and a non-zero spread, and no two neighbouring sizes do")
+        return out
     if not size_break:
+        miss = len(SIZES) - 1 - made
         out["blocker"] = ("no size bucket has an 80% range clearly wider, relative to its duration, than the bucket below, "
-                          "so there is no size at which splitting helps")
+                          "so there is no size at which splitting helps"
+                          + (f" ({miss} of {len(SIZES) - 1} size comparisons could not be made)" if miss else ""))
         return out
     lower = sum(1 for r in rows if SIZES.index(r["size"]) < SIZES.index(size_break))
     upper = len(rows) - lower
@@ -310,7 +320,8 @@ def report(plan, hist, an, cfg, out=print):
                 out(f"  {g:2} n={n}" + ("  (too few tasks or people to show)" if n else ""))
             else:
                 jmp = f"  x{ratio:.1f} vs the bucket below (90% interval {ci[0]:.1f}-{ci[1]:.1f})" if ratio is not None else ""
-                out(f"  {g:2} n={n}  spread {w:.2f}{jmp}" + (f"  (10th percentile under the {FLOOR_H} h floor: not compared)" if fl else ""))
+                out(f"  {g:2} n={n}  spread {w:.2f}{jmp}" + {"floor": f"  (10th percentile under the {FLOOR_H} h floor: not compared)",
+                                                                     "flat": "  (no spread: not compared)"}.get(fl, ""))
         out(f"Break point by size: {an['size_break'] or 'none'}.")
         if an["has_areas"]:
             out(f"Break point by number of areas: {an['area_break'] or 'none'}.")

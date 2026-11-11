@@ -883,6 +883,11 @@ class SizingAdvisor(unittest.TestCase):
             with self.subTest(seed=seed):
                 self.assertIsNone(self.world("small-tasks", seed)[1]["size_break"])
 
+    def test_a_two_times_jump_is_named_at_xl_or_not_at_all(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self.assertIn(self.world("weak-break", seed)[1]["size_break"], ("XL", None))
+
     def test_smooth_widths_give_no_advice_for_large_tasks(self):
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
@@ -940,9 +945,46 @@ class SizingAdvisor(unittest.TestCase):
         members = {"XS": self.rows(0.5, 0.6), "S": self.rows(0.5, 6.0)}   # p10 just above the floor
         self.assertIsNone(advise.find_break(["XS", "S"], members)[0])
 
+    def test_a_bucket_is_floored_only_when_its_10th_percentile_is_under_the_floor(self):
+        # rows(0.5, scale): p10 is about 0.45 x scale
+        for scale, expect in ((0.4, True), (0.667, False)):
+            with self.subTest(scale=scale):
+                ys = [r["y"] for r in self.rows(0.5, scale)]
+                self.assertEqual(advise.bt.q(ys, advise.est.LO_P) < advise.FLOOR_H, expect)
+                members = {"XS": self.rows(0.5, 5.0), "S": self.rows(0.5, scale)}
+                self.assertEqual(bool(advise.find_break(["XS", "S"], members)[1][1][6]), expect)
+
+    def test_a_bucket_with_no_spread_is_not_compared_and_does_not_crash(self):
+        flat = [dict(y=1.0, author=LOGINS[i % 3]) for i in range(60)]
+        members = {"XS": flat, "S": self.rows(0.8, 5.0), "M": self.rows(0.8, 50.0)}
+        brk, detail = advise.find_break(["XS", "S", "M"], members)
+        self.assertIsNone(brk)
+        self.assertEqual([d[6] for d in detail], ["flat", None, None])
+        self.assertIsNone(detail[1][4])
+        self.assertIsNotNone(detail[2][4])
+
+    def history(self, groups):
+        rows = [dict(r, size=g, areas=None) for g, rs in groups.items() for r in rs]
+        return dict(rows=rows, newest=T0, has_areas=False)
+
+    def test_when_no_size_can_be_compared_the_advisor_says_so_instead_of_reporting_no_break(self):
+        h = self.history({g: self.rows(0.8, 0.5, zeros=0.3) for g in advise.SIZES})
+        an = advise.analyse(h, UTC)
+        self.assertEqual(an["compared"], (0, 4))
+        self.assertIn("no size could be compared", an["blocker"])
+        self.assertNotIn("no size bucket has", an["blocker"])
+
+    def test_a_no_break_verdict_counts_the_comparisons_it_could_not_make(self):
+        groups = {g: self.rows(0.8, 5.0) for g in advise.SIZES}
+        groups["S"] = self.rows(0.8, 0.5, zeros=0.3)
+        an = advise.analyse(self.history(groups), UTC)
+        self.assertEqual(an["compared"], (2, 4))
+        self.assertIn("(2 of 4 size comparisons could not be made)", an["blocker"])
+        an = advise.analyse(self.history({g: self.rows(0.8, 5.0) for g in advise.SIZES}), UTC)
+        self.assertNotIn("could not be made", an["blocker"])
+
     def test_a_floored_bucket_is_marked_in_the_report(self):
-        members = {g: self.rows(0.8, 0.5, zeros=0.3) for g in ("XS", "S")}
-        hist = dict(rows=[dict(r, size=g, areas=None) for g in ("XS", "S") for r in members[g]], newest=T0, has_areas=False)
+        hist = self.history({g: self.rows(0.8, 0.5, zeros=0.3) for g in ("XS", "S")})
         out = []
         advise.report([], hist, advise.analyse(hist, UTC), {}, out.append)
         self.assertIn("floor: not compared", "\n".join(out))
