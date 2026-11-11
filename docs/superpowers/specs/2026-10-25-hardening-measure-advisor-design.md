@@ -48,15 +48,15 @@ would tell every change to split. The measure is fixed first.
 tasks with paths and size).
 
 - **Split** when the task is above the history's *break point*: the smallest size bucket or area
-  count at which the 80% range more than doubles in width compared with the bucket below. Slices
+  count at which the 80% range, relative to the duration (log hours), is clearly wider than in the bucket below (the bootstrap 90% interval of the ratio lies above 1.5). Slices
   follow area boundaries in dependency order (shared code, then the services using it, then UI,
   then docs), each with its own estimate.
 - **Merge** when two planned tasks are both XS or S and touch the same area.
 - **Keep** otherwise.
-- **No advice** when history has fewer than 20 tasks on either side of the break point, or when the
-  backtest shows split tasks were not faster in total than single tasks of the same total size.
-- The backtest of the advisor: for past tasks above the break point, compare the total cycle time of
-  sets of tasks closing one parent issue with single tasks of the same total size.
+- **No advice** when history has fewer than 20 tasks on either side of the break point, or when
+  past splits (tasks sharing a parent link) took more total work hours than single tasks of the same total size. Without parent links the advice rests on the break alone and says past splits could not be checked.
+- The backtest of the advisor: for past tasks above the break point, compare the summed working hours of
+  sets of tasks under one parent link with single tasks of the same total size.
 
 ## Release v0.2.x — sizing advisor, diff mode
 
@@ -97,9 +97,8 @@ window in `drift`, and the product-code bucket in `test-heavy`.
 | drift | tasks get 2× faster 100 days before the end | `backtest` picks 60 or 90 days, scoring at least 15% better than "all"; `estimate` uses it and covers 70–90% of fresh tasks |
 | steady | no change over time, wide spread | `backtest` picks "all", so a fixed 90-day choice fails; `estimate` uses it and covers 70–90% of fresh tasks |
 | test-heavy | a third of tasks are M by product code and carry 5× that in tests, enough to make them XL if tests counted | each lands in the bucket of its product-code size and is flagged test-heavy; no other task is flagged |
-| break-point | width grows 3× from L to XL; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break, and the replay of those slices finishes sooner in total than the single task |
-| no-break | width grows smoothly; 60 tasks per bucket | the advisor gives no advice |
-| slow-splits | a break at XL, but past split tasks took longer in total | the advisor gives no advice |
+| break-point | the relative spread is 3× wider at XL than at L; 60 tasks per bucket | the advisor names XL as the break and splits no L task; the slices together cover every planned file, each is below the break |
+| no-break | the same relative spread at every size; 60 tasks per bucket | the advisor gives no advice |
 | thin-advisor | a break at XL, 15 XL tasks | the advisor gives no advice and says history is too thin |
 | merge-keep | a plan of two XS tasks in one area, two XS tasks in different areas, and one M task | the advisor merges only the same-area pair and keeps the rest |
 | thin | 30 tasks, 27 of them S and 3 of them L | `backtest` refuses; `estimate --size L` says the size has too little history and gives the size-blind range; `estimate --size S` gives a size range |

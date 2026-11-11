@@ -37,7 +37,11 @@ M = [
  ("tasks.py", 'end=max(prs[n]["merged_at"] for n in ns)', 'end=min(prs[n]["merged_at"] for n in ns)', "task ends at first PR merge, not last"),
  ("tasks.py", 'groups[("issue", closing[0]) if closing else ("pr", n)].append(n)', 'groups[("pr", n)].append(n)', "PRs closing one issue not grouped"),
  ("history.py", 'return len(rs) >= MIN_CELL and len({r.get("author") for r in rs}) >= MIN_AUTHORS', 'return True', "summary shows small groups"),
- ("advise.py", 'w > GROWTH * prev[1]', 'w > 1.0 * prev[1]', "advisor break threshold: any growth counts"),
+ ("advise.py", 'if ci and ci[0] > GROWTH:', 'if ci and ci[0] > 1.0:', "advisor break threshold: any growth counts"),
+ ("advise.py", 'return math.log(bt.q(ys, est.HI_P) + 1) - math.log(bt.q(ys, est.LO_P) + 1)', 'return bt.q(ys, est.HI_P) - bt.q(ys, est.LO_P)', "advisor spread in absolute hours, not relative to scale"),
+ ("advise.py", 'if ci and ci[0] > GROWTH:', 'if ratio and ratio > 2 * GROWTH:', "advisor break ignores the bootstrap interval"),
+ ("advise.py", 'ok = len(rs) >= est.MIN_N and shown(rs)', 'ok = len(rs) >= est.MIN_N', "advisor break uses buckets hidden for privacy"),
+ ("advise.py", 'sum(r["y_raw"] for r in rs)) for rs in by_parent', 'max(r["y_raw"] for r in rs)) for rs in by_parent', "past splits judged on the longest slice, not the summed hours"),
  ("advise.py", 'if min(lower, upper) < MIN_SIDE:', 'if False:', "advisor gives advice on thin history"),
  ("files.py", 'def open_out', '# control\ndef open_out', "control: no behaviour change (must survive)"),
 ]

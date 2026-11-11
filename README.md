@@ -131,7 +131,7 @@ so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimat
 `cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
 (same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
 Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks), plus five
-for the advisor (`break-point`, `no-break`, `slow-splits`, `thin-advisor`, `merge-keep`), which also
+for the advisor (`break-point`, `no-break`, `thin-advisor`, `merge-keep`), which also
 write a `plan.jsonl`. The tests use them to check that the numbers are right, not only that the code runs.
 
 ## Should this task be split?
@@ -142,11 +142,12 @@ cc-estimate advise --plan plan.jsonl     # JSON lines: id, size, paths
 ```
 
 For each planned task it prints Split, Merge, Keep or No advice, with the reason in one sentence. The
-break point is the smallest size where the 80% range gets more than twice as wide as the size below.
+break point is the smallest size where the 80% range, relative to the duration (in log hours), is clearly wider than at the size below: the bootstrap 90% interval of the ratio lies above 1.5.
 A Split lists slices in dependency order (shared code, services, UI, tests, docs; the patterns are
 in the config under `advise.layers`) with a range for each. There is no advice when the history has
-fewer than 20 tasks on either side of the break, or when past splits were not faster in total than
-single tasks, or when splits cannot be found (the git-only source has no parent issues). Two XS or S
+fewer than 20 tasks on either side of the break, or when past splits (tasks with a `parent` link, not
+written by any source yet) took more total work hours than single tasks. Without parent links the
+advice rests on the break alone and the output says past splits could not be checked. Two XS or S
 tasks in the same area get Merge. See [Reading `advise`](docs/how-it-works.md#reading-advise).
 
 ## Adapting it to your stack

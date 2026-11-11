@@ -829,16 +829,16 @@ class SizingAdvisor(unittest.TestCase):
     """The advisor on histories with a known break point, on the same seeds as the other scenarios."""
     SEEDS = range(7, 12)
 
-    def world(self, name, seed, strip_issues=False):
+    def world(self, name, seed, parents=None):
         generated, _ = simulate.generate(name, seed)
-        if strip_issues:
-            generated = [{k: v for k, v in g.items() if k != "issues"} for g in generated]
+        if parents:
+            generated = parents(generated)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name) / "tasks.jsonl"
         simulate.write_rows(generated, path)
         hist = advise.load_history(str(path), UTC, {})
-        return hist, advise.analyse(hist, UTC), simulate.PLANS.get(name, [])
+        return hist, advise.analyse(hist), simulate.PLANS.get(name, [])
 
     def verdicts(self, name, seed, plan=None, history=True, **kw):
         hist, an, default_plan = self.world(name, seed, **kw)
@@ -867,16 +867,12 @@ class SizingAdvisor(unittest.TestCase):
         slices = self.verdicts("break-point", 7)["big"][2]
         self.assertEqual([s["layer"] for s in slices], ["shared code", "services", "UI", "tests", "docs"])
 
-    def test_past_splits_in_the_break_point_world_finished_sooner_than_single_xl_tasks(self):
-        # The closest check to replaying the proposed slices: the slices are new, so the history of
-        # real splits stands in for them.
+    def test_same_relative_spread_at_every_size_shows_no_break(self):
+        # size-matters draws one lognormal sigma at every size, so absolute widths grow with the median
+        # but nothing breaks.
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
-                hist, _, _ = self.world("break-point", seed)
-                sets, singles = advise.split_sets(hist["rows"], UTC)
-                self.assertEqual(len(sets), simulate.SETS)
-                one = [r["y_raw"] for r in singles if r["size"] == "XL"]
-                self.assertLess(st_median([t for _, t in sets]), st_median(one))
+                self.assertIsNone(self.world("size-matters", seed)[1]["size_break"])
 
     def test_smooth_widths_give_no_advice_for_large_tasks(self):
         for seed in self.SEEDS:
@@ -886,14 +882,6 @@ class SizingAdvisor(unittest.TestCase):
                 for verdict, why, _ in self.verdicts("no-break", seed).values():
                     self.assertEqual(verdict, "No advice")
                     self.assertIn("no size bucket", why)
-
-    def test_splits_that_took_longer_give_no_advice(self):
-        for seed in self.SEEDS:
-            with self.subTest(seed=seed):
-                self.assertEqual(self.world("slow-splits", seed)[1]["size_break"], "XL")
-                verdict, why, _ = self.verdicts("slow-splits", seed)["big"]
-                self.assertEqual(verdict, "No advice")
-                self.assertIn("not faster in total", why)
 
     def test_thin_history_gives_no_advice_and_says_so(self):
         for seed in self.SEEDS:
@@ -911,24 +899,51 @@ class SizingAdvisor(unittest.TestCase):
                     self.assertEqual({k: x[0] for k, x in v.items()},
                                      {"a": "Merge", "b": "Merge", "c": "Keep", "d": "Keep", "e": "Keep"})
 
-    def test_history_without_parent_links_cannot_be_checked_and_gives_no_advice(self):
-        verdict, why, _ = self.verdicts("break-point", 7, strip_issues=True)["big"]
-        self.assertEqual(verdict, "No advice")
-        self.assertIn("no parent-issue links", why)
+    @staticmethod
+    def rows(sigma, scale=10.0, n=60, authors=3):
+        """Hours with a fixed lognormal shape: the 80% range is the same fraction of `scale` for a given sigma."""
+        import math
+        z = [-2 + 4 * i / (n - 1) for i in range(n)]
+        return [dict(y=scale * math.exp(sigma * zi), author=LOGINS[i % authors]) for i, zi in enumerate(z)]
 
-    def test_a_break_needs_the_range_to_more_than_double(self):
-        def rows(spread):
-            return [dict(y=10 + spread * i / 19, author=LOGINS[i % 3]) for i in range(20)]
-        for factor, expect in ((1.9, None), (2.2, "S")):
-            with self.subTest(factor=factor):
-                members = {"XS": rows(10), "S": rows(10 * factor)}
+    def test_a_break_is_a_wider_relative_spread_not_a_longer_task(self):
+        for scale, sigma, expect in ((100, 0.3, None), (1000, 0.3, None), (10, 0.9, "S")):
+            with self.subTest(scale=scale, sigma=sigma):
+                members = {"XS": self.rows(0.3), "S": self.rows(sigma, scale)}
                 self.assertEqual(advise.find_break(["XS", "S"], members)[0], expect)
 
+    def test_a_jump_inside_the_bootstrap_interval_is_not_a_break(self):
+        # 8 tasks per bucket: a x1.8 spread is plausible noise at that size
+        members = {"XS": self.rows(0.3, n=8), "S": self.rows(0.54, n=8)}
+        self.assertIsNone(advise.find_break(["XS", "S"], members)[0])
+        members = {"XS": self.rows(0.3, n=60), "S": self.rows(0.54, n=60)}
+        self.assertEqual(advise.find_break(["XS", "S"], members)[0], "S")
+
+    def test_a_bucket_hidden_for_privacy_is_not_used_to_find_a_break(self):
+        members = {"XS": self.rows(0.3), "S": self.rows(0.9, authors=2)}
+        self.assertIsNone(advise.find_break(["XS", "S"], members)[0])
+        self.assertFalse(advise.find_break(["XS", "S"], members)[1][1][3])
+
     def test_a_break_by_number_of_areas_is_found_when_areas_are_present(self):
-        def at(_areas, spread):
-            return [dict(y=10 + spread * i / 19, author=LOGINS[i % 3]) for i in range(20)]
-        members = {"1": at(1, 10), "2": at(2, 12), "3": at(3, 40), "4+": at(4, 40)}
+        members = {"1": self.rows(0.3), "2": self.rows(0.35), "3": self.rows(0.9), "4+": self.rows(0.9)}
         self.assertEqual(advise.find_break(advise.AREA_GROUPS, members)[0], "3")
+
+    def test_without_parent_links_the_break_alone_decides_and_the_report_says_splits_were_not_checked(self):
+        hist, an, plan = self.world("break-point", 7)
+        self.assertEqual(self.verdicts("break-point", 7)["big"][0], "Split")
+        out = []
+        advise.report([dict(t) for t in plan], hist, an, {}, out.append)
+        self.assertIn("Past splits could not be checked: this history has no parent links", "\n".join(out))
+
+    def test_past_splits_are_judged_on_the_summed_hours_of_their_slices(self):
+        def sets(hours_each):
+            rows = [dict(code_lines=2000, y_raw=hours_each, size="L", parent=k // 3) for k in range(15)]
+            return rows + [dict(code_lines=6000, y_raw=20.0, size="XL", parent=None) for _ in range(6)]
+        for hours_each, faster in ((5.0, True), (9.0, False)):
+            with self.subTest(hours_each=hours_each):
+                ok, text = advise.split_evidence(sets(hours_each), "XL")
+                self.assertIs(ok, faster)
+                self.assertIn(f"took a median of {3 * hours_each:.1f} work hours in total", text)
 
     def test_output_names_the_break_the_ordering_rule_and_hides_small_groups(self):
         hist, an, plan = self.world("break-point", 7)
@@ -940,7 +955,7 @@ class SizingAdvisor(unittest.TestCase):
         self.assertIn("No area data", text)
         two = dict(hist, rows=[dict(r, author=LOGINS[i % 2]) for i, r in enumerate(hist["rows"])])
         out = []
-        advise.report([dict(t) for t in plan], two, advise.analyse(two, UTC), {}, out.append)
+        advise.report([dict(t) for t in plan], two, advise.analyse(two), {}, out.append)
         self.assertIn("too few tasks or people to show", "\n".join(out))
         self.assertNotRegex("\n".join(out), r"median [\d.]+ h, n=")
 
