@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Estimate a task from this repo's history, log the estimate, and score logged estimates.
 
-  cc-estimate estimate --size M [--issue N | --text "..."] [--paths a/ b.py] [--log] [--off 2026-10-14..2026-10-16]
+  cc-estimate estimate --size M [--issue N | --text "..."] [--paths a/ b.py] [--queue N] [--log] [--off 2026-10-14..2026-10-16]
   cc-estimate attach <estimate-id> --pr N        # link a logged estimate to the PR that delivered it
   cc-estimate score                              # fill actuals from GitHub, print the running score
 
@@ -10,6 +10,11 @@ The range is the p10-p90 of work hours (minus absence and blocked time) for fini
 (the only signal that held up in backtest.py). Each logged estimate also stores the
 size-blind repo range, so `score` can say whether the planned size helped.
 Only the current gh user's estimates are logged or scored.
+
+When the history carries ready_at, the total is split in two: coding (by size) and waiting for review.
+Waiting does not follow size; it follows how many PRs are already waiting on the same reviewers.
+`--queue N` is that count today. The waiting range is Kaplan-Meier over finished tasks plus the PRs
+still open (from the queue file), so slow waits that have not ended yet are not dropped.
 """
 import argparse, json, os, re, subprocess, sys, uuid
 from datetime import datetime, timedelta, timezone
@@ -77,6 +82,70 @@ def days(h):
     return f"{h / HOURS_PER_DAY:.1f}"
 
 
+def span(vals):
+    """'lo-hi h (a-b d), median m h (c d)' from three (hours, reached) quantiles; a quantile the
+    data never reaches is a floor and carries a '+'."""
+    (lo, _), (med, med_ok), (hi, hi_ok) = vals
+    plus = lambda ok: "" if ok else "+"
+    return (f"{lo:.1f}-{hi:.1f}{plus(hi_ok)} work hours ({days(lo)}-{days(hi)}{plus(hi_ok)} working days), "
+            f"median {med:.1f}{plus(med_ok)} h ({days(med)}{plus(med_ok)} d)")
+
+
+def km3(obs):
+    return [bt.km_quantile(obs, p) for p in (LO_P, 0.5, HI_P)]
+
+
+def data_end(rows, pool, queue_file):
+    """When the data was taken: the queue file's fetch time, else its newest event."""
+    meta = Path(queue_file).with_suffix(".meta.json")
+    if meta.is_file():
+        return bt.parse(json.loads(meta.read_text())["fetched_at"])
+    return max([r["end"] for r in rows] + [t for p in pool for t in (p["ready"], p["closed"]) if t])
+
+
+def split_lines(tasks_path, tz, size, cfg, queue_n=None, queue_file=None):
+    """Coding and waiting ranges, as lines to print; none if the history has no ready_at."""
+    queue_file = queue_file or bt.queue_path(tasks_path)
+    pool = bt.load_queue(queue_file) if queue_file and Path(queue_file).is_file() else None
+    rows = [r for r in bt.load(tasks_path, tz, cfg, None, pool) if r["wait_y"] is not None]
+    if not rows:
+        return []
+    newest = max(r["end"] for r in rows)
+    recent = [r for r in rows if r["start"] <= newest - timedelta(days=CENSOR_DAYS)]
+    same = [r["coding_y"] for r in recent if r["size"] == size]
+    pick, label = (same, f"size {size}") if len(same) >= MIN_N else ([r["coding_y"] for r in recent], "any size")
+    out = []
+    if len(pick) >= MIN_N:
+        vals = [(bt.q(pick, p), True) for p in (LO_P, 0.5, HI_P)]
+        out.append(f"Coding, {label}: {span(vals)}; {len(pick)} tasks.")
+    # Open PRs are known only from the queue file; with them nothing needs dropping for recency.
+    done, open_ = (rows, []) if pool is not None else (recent, [])
+    cuts = bt.tercile_cuts([r["queue"] for r in rows if r["queue"] is not None])
+    if pool is not None:
+        end = data_end(rows, pool, queue_file)
+        open_ = [(bt.biz_hours(p["ready"], p["closed"] or end, tz),
+                  bt.queue_at(pool, p["ready"], p["reviewers"], {p["number"]})[0])
+                 for p in pool if p["ready"] and not p["merged"]]
+    bucket = None
+    if queue_n is not None and cuts:
+        bucket = bt.tercile(queue_n, cuts)
+        obs = [(r["wait_y"], True) for r in done if r["queue"] is not None and bt.tercile(r["queue"], cuts) == bucket]
+        if len(obs) >= MIN_N:
+            obs += [(d, False) for d, qv in open_ if bt.tercile(qv, cuts) == bucket]
+            out.append(f"Waiting for review, with {queue_n} PRs already waiting on your reviewers "
+                       f"({bucket} queue on this repo): {span(km3(obs))}; {len(obs)} PRs, "
+                       f"{sum(not ok for _, ok in obs)} still open.")
+            return out
+        out.append(f"Not enough history for a {bucket} reviewer queue; waiting for review at any queue:")
+    elif queue_n is not None:
+        out.append("No queue file, so the waiting range cannot follow the queue. Waiting for review at any queue:")
+    obs = [(r["wait_y"], True) for r in done] + [(d, False) for d, _ in open_]
+    out.append(f"Waiting for review, any queue: {span(km3(obs))}; {len(obs)} PRs, {len(open_)} still open.")
+    if queue_n is None:
+        out.append("  Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.")
+    return out
+
+
 def print_needs(paths, cfg):
     """What the change has to go through, from the repo's own rules. Informational: in the
     backtest these did not narrow the range beyond size."""
@@ -116,6 +185,8 @@ def cmd_estimate(a, cfg):
         lo, med, hi = base
         print(f"Not enough history for size {a.size}. Without a size: {lo}-{hi} work hours "
               f"({days(lo)}-{days(hi)} working days), median {med} h ({days(med)} d).")
+    for line in split_lines(a.tasks, tz, a.size, cfg, a.queue, a.queue_file):
+        print(line)
     if a.paths:
         print_needs(a.paths, cfg)
     if not a.log:
@@ -260,6 +331,8 @@ def main(argv=None):
     e.add_argument("--size", required=True, choices=[name for _, name in bt.BUCKETS],
                    help="product-code lines (tests and docs not counted): XS <50, S <300, M <1,500, L <5,000, XL")
     e.add_argument("--issue", help="issue number or tracker key (ABC-123)"); e.add_argument("--text")
+    e.add_argument("--queue", type=int, help="open PRs waiting on the reviewers you plan to ask (or their team)")
+    e.add_argument("--queue-file", help="all-PRs file from fetch-queue; default: <repo>.queue.jsonl beside the tasks file")
     e.add_argument("--log", action="store_true")
     e.add_argument("--paths", nargs="*", help="files or directories you expect to change")
     e.add_argument("--off", nargs="*", help="days you will not work on it: 2026-10-14 or 2026-10-14..2026-10-16")
