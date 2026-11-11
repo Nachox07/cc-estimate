@@ -83,7 +83,10 @@ where the backtest shows it winning on your repo.
 **Coding and waiting.** When the history knows when each PR was ready for review, `estimate` also
 prints a coding range (by size) and a waiting range, and `backtest` scores both. Waiting follows how
 many PRs are already waiting on your reviewers, not the size: pass that count as `--queue N`
-(fetch the history with `fetch-queue`). Pull requests still open count in the waiting range.
+(fetch the history with `fetch-queue`; "waiting on a reviewer" means what GitHub's `review-requested`
+search means). Pull requests still open count in the waiting range; ones closed unmerged do not.
+The waiting clock skips public holidays only, not the author's days off. [How it
+works](docs/how-it-works.md#coding-and-waiting) has the definitions.
 
 **6. It keeps score.** Every logged estimate is later compared with the real cycle time. `score`
 reports your coverage, and whether your size call beat a size-blind interval.
@@ -137,7 +140,7 @@ so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimat
 `cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
 (same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
 Scenarios: `size-matters`, `null` (size has no effect), `test-heavy`, `thin` (30 tasks) and
-`wait-dominates` (waiting follows the reviewer queue, not size; also writes `sim/queue.jsonl`). The tests
+`wait-dominates` (waiting follows the reviewer queue, not size; also writes `sim/queue.jsonl`, which `backtest` and `estimate` find beside `sim/tasks.jsonl`). The tests
 use them to check that the numbers are right, not only that the code runs.
 
 ## Adapting it to your stack
@@ -160,8 +163,8 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 | `reviewers` | optional: `[{"who": "user:login" or "team:org/slug", "at": ISO}]`, the reviewers asked (or who reviewed unasked), earliest time each |
 
 The reviewer queue comes from a second file, `<repo>.queue.jsonl`, one row per PR in any state
-(`number`, `state`, `created_at`, `ready_at`, `first_review_at`, `closed_at`, `reviewers`; no authors or
-titles), written by `cc-estimate fetch-queue`. It is used only to count who was waiting. Files without
+(`number`, `state`, `created_at`, `ready_at`, `first_review_at`, `closed_at`, `reviewers` as `{who, at, done_at}`
+where `done_at` is when that reviewer answered; no authors or titles), written by `cc-estimate fetch-queue`. It is used only to count who was waiting. Files without
 the optional fields still load; they just get no coding and waiting split.
 
 A new source is any script that writes those rows: a Jira or Linear API export, Azure DevOps,
@@ -181,7 +184,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small
 hand-made inputs, checks that no estimate can see the future, and runs generated histories where
 size matters and where it does not: size must win clearly in the first and must not win in the
-second, across five seeds. `python3 tests/mutation_probe.py` plants 30 known bugs one at a time and
+second, across five seeds. `python3 tests/mutation_probe.py` plants 34 known bugs one at a time and
 confirms the suite catches every one. Details: [How it
 works](docs/how-it-works.md#how-it-is-tested).
 

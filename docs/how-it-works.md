@@ -144,34 +144,59 @@ for review (`ready_at`), `estimate` also prints two ranges next to the total:
 $ cc-estimate estimate --size M
 ...
 Coding, size M: 0.9-1.7 work hours (0.1-0.2 working days), median 1.1 h (0.1 d); 148 tasks.
-Waiting for review, any queue: 1.4-11.6 work hours (0.2-1.3 working days), median 4.4 h (0.5 d); 899 PRs, 51 still open.
+Waiting for review, any queue: 1.4-11.2 work hours (0.2-1.2 working days), median 4.3 h (0.5 d); 850 waits, 2 still open.
   Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.
 
 $ cc-estimate estimate --size M --queue 6
-Waiting for review, with 6 PRs already waiting on your reviewers (high queue on this repo): 4.2-15.8 work hours ...
+Waiting for review, with 6 PRs already waiting on your reviewers (high queue on this repo): 3.8-15.7 work hours ...
 ```
 
-(Made-up history from `cc-estimate simulate --scenario wait-dominates`.) **Coding** is the working
-time from the first commit to ready-for-review, by size. **Waiting** is the working time from ready
-to the last merge. It is not split by size. It follows the **reviewer queue**: how many other pull
-requests were already ready, unmerged and waiting on at least one of the same reviewers or teams.
-You count it today (the skill does this with `gh search prs`) and pass it as `--queue N`. The range
-then comes from past tasks that faced a queue of the same band (low, middle or high thirds of the
-queues this repo has seen).
+(Made-up history from `cc-estimate simulate --scenario wait-dominates`; `backtest --in sim/tasks.jsonl` finds
+`sim/queue.jsonl` beside it.)
 
-For history, the queue of each past task is counted as it stood at that task's ready moment, from
-`fetch-queue`'s file of every PR (open and closed-unmerged ones too): only reviewer requests made by
-then count, for the task and for the others, and a PR counts as waiting until the moment it merged
-or closed. Nothing that happened later can move it. A task that had named no reviewer yet gets the
-count of all waiting PRs instead.
+**Two clocks.** *Coding* is the working time from the first commit to ready-for-review, by size, minus
+the author's days off and blocked spans, like the total. *Waiting* is the working time from ready to the
+merge, minus public holidays only (the `*` rows of `absence`). The author's calendar and blocked spans do
+not stop a reviewer's clock. So coding and waiting no longer add up to the total whenever someone was off.
 
-The waiting range is a Kaplan-Meier estimate. Pull requests still open, or closed without merging,
-stay in the count until their time runs out without ending a wait. Dropping them would keep only
-the waits that already finished and make slow waits look rare. When too many are still open to say
-where the top of the range is, it prints a `+` after the number: the top is at least that.
-`backtest` scores the same split: `CODING` (repo baseline, same author, size) and `WAIT` (those, plus
-`queue` and `size+queue`) beside the existing total tables. Only counts of waiting PRs are printed,
-never reviewer names.
+**The reviewer queue** is GitHub's own meaning of "review requested": a pull request is in reviewer X's
+queue from X's request until X submits a review (for a team: until any human does), or until it merges
+or closes, whichever comes first. Drafts are not in it. A PR asking several of the reviewers you plan to
+ask counts once. This is what `gh search prs --state open --draft=false --review-requested X` lists,
+which is how the skill counts it today for `--queue N`; a test checks both against one fixture.
+Review requests that land within five minutes after a PR is ready count as made at ready (CODEOWNERS
+asks about a second after a PR opens), for the PR itself and for the others. Re-requests after a
+review start a new entry. A team's request ending at any human's review is an approximation, as the
+data has no team membership.
+
+For history, the queue each past PR faced is counted as it stood at that PR's ready moment, from
+`fetch-queue`'s file of every PR (open and closed-unmerged too). Only requests made by then count,
+a later review or merge cannot move it, and a PR with no reviewer named yet gets the count of all
+ready, unmerged PRs. The backtest's `queue` rows use the queue at the task's ready moment, the
+number someone would count when the PR becomes ready; `estimate` uses the number you pass.
+
+**Waiting is estimated by Kaplan-Meier, from pull requests, not tasks.** One population, one clock: every
+PR in the queue file that became ready on or after the tasks file's first start. A merged PR is a finished
+wait. A PR ready and not yet closed is still waiting, so it stays in the count, censored at the moment of
+the estimate; dropping it would keep only the waits that ended and make slow ones look rare. A PR closed
+without merging is left out: the range is time to merge, for work that merges (a test has the abandoned PRs
+be the slow ones). The queue file may start earlier than the tasks file only so PRs already waiting
+are counted in a task's queue; they are not in the curve, because an old PR still open would be a survivor
+with no finished siblings from its period. Task rows keep `wait_y` for the coding split and the tables.
+When too many PRs are still open to say where the top of the range is, it prints `+`: at least that.
+
+`--queue N` keeps only PRs whose own queue fell in the same third (low, middle, high) as N. The thirds
+are fitted on all history in `estimate`, which has no unseen slice to protect; the backtest fits them
+on its tuning slice so the locked slice stays unseen.
+
+`backtest` scores the same split. `CODING`: repo baseline, same author, size. `WAIT`: those, plus
+`queue` and `size+queue` on task rows, and `km wait` and `km wait+queue`, the ranges `estimate` prints,
+rebuilt for each scored task from the PRs as known at its start (waits finished by then, PRs ready and
+still open then, censored at the start). On the sample, `km wait` matches the plain baseline
+(there is little censoring to correct) and the queue variants cut the Winkler score by about a quarter.
+`--log` stores the coding and waiting ranges and the queue you passed, and `score` reports how often the
+real coding and waiting time landed inside them. Only counts of waiting PRs are printed, never reviewer
+names.
 
 ## Logging and scoring
 
@@ -205,10 +230,10 @@ your own estimates.
   by more than 5% there, and `size` does not beat it by more than 15% on the total.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 30 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants 34 known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
-  probe is not failing everything. All 30 are caught.
+  probe is not failing everything. All 34 are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
