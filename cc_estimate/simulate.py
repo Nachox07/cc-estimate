@@ -127,8 +127,11 @@ def wait_dominates(rnd, n):
     reviewer's request and every team's (any human's review ends a team request, as the loader reads
     it); a second person's request stays until the merge.
     The data ends when the last PR is opened; PRs not done by then are open.
-    Measured over seeds 0-30 with the real loader: 31 of 31 meet the bars; the closest is seed 10, WAIT
-    queue at 0.84 of the baseline's Winkler against the 0.85 bar (seed 19: 0.83)."""
+    Measured over seeds 0-30 with the real loader (31 seeds): CODING size beats the baseline's Winkler by
+    15% or more on 31, with coverage in 0.70-0.90 on 31; worst seed 24 at 0.51 of the baseline. WAIT
+    queue (counted at the start) is below 0.95 on 31 and below 0.85 on 22, mean 0.78; worst seed 12 at
+    0.92. WAIT size stays at 0.95 or more on 31 and TOTAL size at 0.85 or more on 31.
+    """
     specs, w = [], 0.0
     for i in range(n):
         w += rnd.uniform(*GAP)
