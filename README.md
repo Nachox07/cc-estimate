@@ -80,6 +80,11 @@ three numbers:
 `estimate` always prints the size-blind range next to the size range. Trust the size range only
 where the backtest shows it winning on your repo.
 
+**Coding and waiting.** When the history knows when each PR was ready for review, `estimate` also
+prints a coding range (by size) and a waiting range, and `backtest` scores both. Waiting follows how
+many PRs are already waiting on your reviewers, not the size: pass that count as `--queue N`
+(fetch the history with `fetch-queue`). Pull requests still open count in the waiting range.
+
 **6. It keeps score.** Every logged estimate is later compared with the real cycle time. `score`
 reports your coverage, and whether your size call beat a size-blind interval.
 
@@ -104,6 +109,7 @@ cc-estimate git-tasks --repo-dir . --branch origin/main --since "180 days ago" -
 ```bash
 cc-estimate fetch --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.jsonl
 cc-estimate links --repo org/repo --since 2026-04-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.links.jsonl
+cc-estimate fetch-queue --repo org/repo --since 2026-03-01 --until 2026-10-01 --config cc-estimate.json --out data/repo.queue.jsonl   # optional: reviewer queue
 cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config cc-estimate.json --out data/repo.tasks.jsonl
 ```
 
@@ -112,7 +118,7 @@ cc-estimate tasks --prs data/repo.jsonl --links data/repo.links.jsonl --config c
 ```bash
 cc-estimate spans    --tasks data/repo.tasks.jsonl --csv blocked.csv --out data/repo.tasks.jsonl   # optional
 cc-estimate backtest --in data/repo.tasks.jsonl --config cc-estimate.json
-cc-estimate estimate --size M --issue 123 --paths src/api/ --log --config cc-estimate.json --tasks data/repo.tasks.jsonl
+cc-estimate estimate --size M --issue 123 --paths src/api/ --queue 4 --log --config cc-estimate.json --tasks data/repo.tasks.jsonl
 cc-estimate score    --config cc-estimate.json --tasks data/repo.tasks.jsonl
 ```
 
@@ -130,7 +136,8 @@ so install the CLI too (`pipx install git+https://github.com/Nachox07/cc-estimat
 
 `cc-estimate simulate --scenario size-matters --seed 7 --out sim/` writes a made-up `sim/tasks.jsonl`
 (same format as real task files) and `sim/truth.json`, the model the durations were drawn from.
-Scenarios: `size-matters`, `null` (size has no effect), `test-heavy` and `thin` (30 tasks). The tests
+Scenarios: `size-matters`, `null` (size has no effect), `test-heavy`, `thin` (30 tasks) and
+`wait-dominates` (waiting follows the reviewer queue, not size; also writes `sim/queue.jsonl`). The tests
 use them to check that the numbers are right, not only that the code runs.
 
 ## Adapting it to your stack
@@ -147,6 +154,15 @@ Everything downstream reads one file format, `tasks.jsonl`, one JSON object per 
 | `test_lines`, `doc_lines` | changed lines in tests and in docs, by the config's `tests_patterns` and `docs_patterns`; tests over 3x `code_lines` make a task test-heavy |
 | `lines` | all three added up. Files without `code_lines` still load, sized by `lines` |
 | `excluded` | `{"blocked": [[start, end], …], …}`: non-working periods |
+| `prs` | the task's PR numbers; the reviewer queue leaves them out of its own count |
+| `ready_at` | optional: when its first PR was ready for review. With it, cycle time splits into coding (start to ready) and waiting (ready to end) |
+| `first_review_at` | optional: first human review |
+| `reviewers` | optional: `[{"who": "user:login" or "team:org/slug", "at": ISO}]`, the reviewers asked (or who reviewed unasked), earliest time each |
+
+The reviewer queue comes from a second file, `<repo>.queue.jsonl`, one row per PR in any state
+(`number`, `state`, `created_at`, `ready_at`, `first_review_at`, `closed_at`, `reviewers`; no authors or
+titles), written by `cc-estimate fetch-queue`. It is used only to count who was waiting. Files without
+the optional fields still load; they just get no coding and waiting split.
 
 A new source is any script that writes those rows: a Jira or Linear API export, Azure DevOps,
 GitLab. The `spans` command already accepts a CSV of `key,group,start,end` from any tracker's
@@ -165,7 +181,7 @@ that mean "not working", and the `classifier` hooks for approval and test-suite 
 `python3 -m unittest discover -s tests` runs the suite (stdlib only). It covers each rule on small
 hand-made inputs, checks that no estimate can see the future, and runs generated histories where
 size matters and where it does not: size must win clearly in the first and must not win in the
-second, across five seeds. `python3 tests/mutation_probe.py` plants 24 known bugs one at a time and
+second, across five seeds. `python3 tests/mutation_probe.py` plants 30 known bugs one at a time and
 confirms the suite catches every one. Details: [How it
 works](docs/how-it-works.md#how-it-is-tested).
 
@@ -176,7 +192,8 @@ Delivery history contains your colleagues' activity. The raw files hold their lo
 a PR title (titles can name people) or the numbers of someone else's PR. `summary` prints totals per size
 bucket and hides the numbers of a bucket with fewer than five PRs or three authors; the size table
 in `backtest` does the same. `ci` adds its results to the history file and prints only a count.
-`fetch` writes only to a file. The test suite runs `tasks`, `spans`, `backtest`, `estimate`,
+`fetch` and `fetch-queue` write only to a file; the queue file holds reviewer logins, so it is git-ignored with the rest of `data/`, and
+`estimate` and `backtest` print only how many PRs were waiting. The test suite runs `tasks`, `spans`, `backtest`, `estimate`,
 `summary` and `git-tasks` on a three-person fixture and fails if another login appears.
 
 What this does not hide: `estimate` and the backtest scores are ranges over whoever did similar
@@ -187,7 +204,6 @@ time mostly measures waiting, not effort, so don't use any of it to compare peop
 
 v0.1.1. Planned work:
 - Jira and Linear API sources.
-- Splitting cycle time into active work and waiting.
 - Similar-task retrieval to show the closest finished tasks beside the range.
 - A split / keep / merge check for tasks that are too big or too small.
 

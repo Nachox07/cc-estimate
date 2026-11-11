@@ -134,6 +134,45 @@ With a `classifier` in the config, `--paths` adds what the change will go throug
 which approval groups and test suites the paths trigger. That is context; it does not change the
 range.
 
+## Coding and waiting
+
+Most of a task's cycle time is usually waiting for review, and the size of the change says little
+about how long that takes. So when the history knows the moment each pull request was marked ready
+for review (`ready_at`), `estimate` also prints two ranges next to the total:
+
+```text
+$ cc-estimate estimate --size M
+...
+Coding, size M: 0.9-1.7 work hours (0.1-0.2 working days), median 1.1 h (0.1 d); 148 tasks.
+Waiting for review, any queue: 1.4-11.6 work hours (0.2-1.3 working days), median 4.4 h (0.5 d); 899 PRs, 51 still open.
+  Pass --queue N (open PRs waiting on your planned reviewers) to fit it to today's queue.
+
+$ cc-estimate estimate --size M --queue 6
+Waiting for review, with 6 PRs already waiting on your reviewers (high queue on this repo): 4.2-15.8 work hours ...
+```
+
+(Made-up history from `cc-estimate simulate --scenario wait-dominates`.) **Coding** is the working
+time from the first commit to ready-for-review, by size. **Waiting** is the working time from ready
+to the last merge. It is not split by size. It follows the **reviewer queue**: how many other pull
+requests were already ready, unmerged and waiting on at least one of the same reviewers or teams.
+You count it today (the skill does this with `gh search prs`) and pass it as `--queue N`. The range
+then comes from past tasks that faced a queue of the same band (low, middle or high thirds of the
+queues this repo has seen).
+
+For history, the queue of each past task is counted as it stood at that task's ready moment, from
+`fetch-queue`'s file of every PR (open and closed-unmerged ones too): only reviewer requests made by
+then count, for the task and for the others, and a PR counts as waiting until the moment it merged
+or closed. Nothing that happened later can move it. A task that had named no reviewer yet gets the
+count of all waiting PRs instead.
+
+The waiting range is a Kaplan-Meier estimate. Pull requests still open, or closed without merging,
+stay in the count until their time runs out without ending a wait. Dropping them would keep only
+the waits that already finished and make slow waits look rare. When too many are still open to say
+where the top of the range is, it prints a `+` after the number: the top is at least that.
+`backtest` scores the same split: `CODING` (repo baseline, same author, size) and `WAIT` (those, plus
+`queue` and `size+queue`) beside the existing total tables. Only counts of waiting PRs are printed,
+never reviewer names.
+
 ## Logging and scoring
 
 `estimate --log --issue 123` appends the range to `data/estimates.jsonl` with your login. After the
@@ -159,13 +198,17 @@ your own estimates.
   an exact number: in `size-matters` the size rows cover 70-90% and beat the baseline's Winkler score by
   at least 15%; in `null` they land within 5% of it; in `test-heavy` each test-heavy task is sized by its
   product code and flagged, and no other task is; in `thin` (27 S and 3 L tasks) `backtest` refuses and
-  `estimate` gives a size range for S and the size-blind range for L.
+  `estimate` gives a size range for S and the size-blind range for L. In `wait-dominates` (PRs opened
+  every few hours, two reviewer teams, waiting driven by the queue) coding follows size, waiting
+  follows the queue and not size, and the total, mostly waiting, is no better with size than without:
+  on the locked slice `queue` beats the baseline by at least 15% on `WAIT`, `size` does not beat it
+  by more than 5% there, and `size` does not beat it by more than 15% on the total.
 - **Privacy.** Every command that runs offline is run on a three-person history and fails if
   another person's login appears. Small groups are hidden in `summary` and `backtest`.
-- **Mutation probe.** `python3 tests/mutation_probe.py` plants 24 known bugs one at a time (a
+- **Mutation probe.** `python3 tests/mutation_probe.py` plants 30 known bugs one at a time (a
   look-ahead leak, a dropped miss penalty, weekends counted as work, the wrong range level, and so
   on) and checks that the suite fails for each. A last, harmless change must pass, which shows the
-  probe is not failing everything. All 24 are caught.
+  probe is not failing everything. All 30 are caught.
 - **CI** runs the suite on Python 3.10, 3.12 and 3.13, installs the package from scratch, runs
   `init` and `git-tasks` from outside the source tree, and checks the plugin manifests.
 
