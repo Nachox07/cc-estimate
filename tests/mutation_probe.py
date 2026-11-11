@@ -43,6 +43,9 @@ M = [
  ("backtest.py", 'REQUEST_GRACE = timedelta(minutes=5)', 'REQUEST_GRACE = timedelta(0)', "a reviewer request a second after ready is not known at ready"),
  ("backtest.py", '(done is None or done > ready)', 'True', "a PR stays in a reviewer's queue after that reviewer answered"),
  ("backtest.py", 'if p["ready"] is None or p["ready"] < since:', 'if p["ready"] is None:', "wait curve reaches back before the tasks file"),
+ ("backtest.py", 'if p["number"] in skip or p["ready"] is None or p["ready"] > now:', 'if p["number"] in skip or p["ready"] is None or p["ready"] > now or p["bot"]:', "bot-authored PRs left out of the reviewer queue"),
+ ("backtest.py", 't["queue"], t["queue_repo"] = queue_at(pool, t["start"], who, skip)', 't["queue"], t["queue_repo"] = queue_at(pool, t["ready"], who, skip)', "queue rows use the queue at ready, which a planner does not have at the start"),
+ ("backtest.py", '            obs.append((p["wait"], False))', '            pass', "PR closed unmerged is dropped instead of censored at its close"),
  ("files.py", 'def open_out', '# control\ndef open_out', "control: no behaviour change (must survive)"),
 ]
 rows = []
