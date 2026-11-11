@@ -180,9 +180,26 @@ time mostly measures waiting, not effort, so don't use any of it to compare peop
 
 v0.1.1. Planned work:
 - Jira and Linear API sources.
-- Splitting cycle time into active work and waiting.
+- Splitting cycle time into coding and review wait, with the wait conditioned on the reviewer queue.
+- Peer pools, time off, handovers and blocked-time signals
+  ([design](docs/superpowers/specs/2026-10-28-peer-pool-time-off-design.md)).
 - Similar-task retrieval to show the closest finished tasks beside the range.
 - A split / keep / merge check for tasks that are too big or too small.
+
+How the planned pieces fit together:
+
+```mermaid
+flowchart TD
+  H["Finished tasks"] --> C["Coding: start to ready for review"]
+  H --> W["Review wait: ready to merge"]
+  C --> C1["minus the owner's time off"]
+  C1 --> C2["compared within the owner's pool, if the pool is big enough"]
+  W --> W1["minus public holidays only"]
+  W1 --> W2["conditioned on the reviewer queue when the task became ready"]
+  C2 --> E["estimate: coding range + wait range, and delivery dates"]
+  W2 --> E
+  S["Blocked time, time off during the wait"] -. shown beside the range .-> E
+```
 
 ## Credits
 
